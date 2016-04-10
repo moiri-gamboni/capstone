@@ -22,17 +22,17 @@ def preprocess():
         tmp = (p for m in filter(lambda m: m is not None, tmp) for p in m)
         #tokenize and count ngrams
         tmp = pool.imap_unordered(tokenize_email, tmp) 
-        print('processing emails...')
+        print('parsing emails...')
         with shelve.open('emails.shelve') as emails:
             for i, t in enumerate(tmp):
                 if t[0] not in emails:
                     emails[t[0]] = t[1]
                 for ngram, c in iter(count_ngrams(t[1]).items()):
                     ngram_counter[ngram] += c
-                if i%100 == 0: 
+                if i%1000 == 0: 
                     print('processing email...', i)
 
-    print('saved dict of email tokens hashed by md5 in email.pickle')
+    print('saved dict of email tokens hashed by md5 in emails.shelve')
 
     print('building trie...')
     trie = marisa_trie.RecordTrie('I', 
@@ -40,8 +40,6 @@ def preprocess():
     print('saving trie...')
     trie.save('trie.marisa')
     print('saved marisa_trie.RecordTrie of ngram frequency hashed by ngram in trie.marisa''')
-
-    return emails, trie
 
 def md5_hash(tokens):
     return hashlib.md5(' '.join(tokens).encode('utf-8')).hexdigest()
@@ -155,14 +153,13 @@ def email_stats(msg, ratio, skip=True):
     result['data'] = recall_email(tokens, trie, md5)
     return result
 
-def main(sample_size=100, ratio_step=0.1, max_len=10, verbose=False):
+def main(sample_size=100, ratio_step=0.1, max_len=50, verbose=False):
     global trie
     n = 3
     print('opening emails and trie...')
     with shelve.open('emails.shelve') as emails:
         trie = marisa_trie.RecordTrie('I')
         trie.load('trie.marisa')
-        hashes = filter(lambda m: n<=len(emails[m])<=max_len, emails)
         print('gathering stats...')
         with open('stats.csv', 'w') as f:
             csv.writer(f).writerow([
@@ -179,7 +176,7 @@ def main(sample_size=100, ratio_step=0.1, max_len=10, verbose=False):
             with Pool() as pool:
                 results = pool.imap_unordered(
                     functools.partial(email_stats, ratio=ratio), 
-                    ((h, emails[h]) for h in hashes))
+                    ((h, msg) for h, msg in iter(emails.items()) if n<=len(msg)<= max_len))
                 for r in itertools.islice((r for r in results if 'data' in r), sample_size):
                     with open('stats.csv', 'a') as f:
                         if verbose: PrettyPrinter().pprint(r)
