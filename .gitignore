@@ -1,6 +1,10 @@
 #raw ENRON dataset
 maildir/
 
+#preprocess results
+emails.shelve
+trie.marisa
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
