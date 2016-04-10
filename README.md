@@ -2,8 +2,9 @@
 Python 3 Forgit implementation on ENRON email dataset for Capstone at NYUAD
 
 1. download ENRON email dataset (maildir in root)
-2. ```emails.preprocess()``` to parse emails and generate trie
-3. ```emails.main(sample_size=100, ratio_step=0.1, max_len=50, verbose=False)``` 
+2. ```pip install marisa-trie```
+3. ```emails.preprocess()``` to parse emails and generate trie
+4. ```emails.main(sample_size=100, ratio_step=0.1, max_len=50, verbose=False)``` 
   
   generates statistics which are continuously written to *stats.csv*. 
   
