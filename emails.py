@@ -141,7 +141,7 @@ def recall_email(tokens, trie, md5):
             raise e
     raise Exception()
 
-def email_stats(msg, ratio, skip=True):
+def email_stats(msg, ratio, skip=False):
     result = {}
     md5, msg = msg
     tokens = forget_email(msg, ratio)
