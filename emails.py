@@ -159,7 +159,7 @@ def main(sample_size=100, ratio_step=0.1, max_len=10, verbose=False):
     global trie
     n = 3
     print('opening emails and trie...')
-    with shelve.open('email.shelve') as emails:
+    with shelve.open('emails.shelve') as emails:
         trie = marisa_trie.RecordTrie('I')
         trie.load('trie.marisa')
         hashes = filter(lambda m: n<=len(emails[m])<=max_len, emails)
