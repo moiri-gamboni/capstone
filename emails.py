@@ -16,7 +16,7 @@ def preprocess(regex=True, bloom_filter=True):
     paths = (f[0]+'/'+g for f in os.walk('maildir/') for g in f[2])
     paths = filter(os.path.isfile, paths)
     #only process 10 emails
-    paths = itertools.islice(paths, 10)
+    # paths = itertools.islice(paths, 10)
     with Pool() as pool:
         #stringify email parts
         print('parsing emails...')
