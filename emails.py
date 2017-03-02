@@ -43,8 +43,8 @@ def preprocess(ngram_length=3):
     print('processing emails...')
     with Pool() as pool:
         email_pipeline = pool.imap_unordered(email_to_str_list, paths)
-        email_pipeline = (
-            email for thread in email_pipeline for email in thread if email is not None)
+        email_pipeline = (thread for thread in email_pipeline if thread is not None)
+        email_pipeline = (msg for thread in email_pipeline for msg in thread)
         email_pipeline = pool.imap_unordered(tokenize_email, email_pipeline)
         with shelve.open('emails.shelve') as emails:
             for i, (tokens_hash, tokens) in enumerate(email_pipeline):
@@ -80,8 +80,8 @@ def email_to_str_list(path):
     with open(path) as thread_file:
         try:
             thread = email.message_from_file(thread_file)
-            emails = (email for email in thread.walk() if not email.is_multipart())
-            return [email.get_payload() for email in emails]
+            emails = (msg for msg in thread.walk() if not msg.is_multipart())
+            return [msg.get_payload() for msg in emails]
         except UnicodeDecodeError:
             print('cannot parse:', path)
 
@@ -169,6 +169,30 @@ def recall_email(tokens, trie, md5, ngram_length, bloom_filter):
     #email should always be recalled
     raise Exception('Could not reconstruct email.')
 
+def print_to_csv(result, run_config):
+    if run_config['verbose']:
+        PrettyPrinter().pprint(result)
+    with open('stats.csv', 'a') as csv_file:
+        csv.writer(csv_file).writerow([
+            result['md5'],
+            result['length'],
+            '{:.5}'.format(result['ratio']),
+            result.get('bloom_hashed', ''),
+            result.get('no_bloom_hashed', ''),
+            ('time: {}, '
+             'sample_size: {}, '
+             'max_email_len: {}, '
+             'use_bloom_filter: {}, '
+             'ngram_length: {}, '
+             'compare_bloom_filter: {}').format(
+                 run_config['time'],
+                 run_config['sample_size'],
+                 run_config['max_email_len'],
+                 run_config['use_bloom_filter'],
+                 run_config['ngram_length'],
+                 run_config['compare_bloom_filter']),
+        ])
+
 def email_stats(item, ratio, trie, run_config):
     """Return a dictionary with information about a recalled email"""
     result = {}
@@ -193,13 +217,17 @@ def email_stats(item, ratio, trie, run_config):
         result['no_bloom_hashed'] = recall_email(
             tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
     if run_config['use_bloom_filter']:
-        os.remove(bloom_filter_path)
+        try:
+            os.remove(bloom_filter_path)
+        except FileNotFoundError:
+            pass
+
     return result
 
-def main(run_config, verbose=False, clear=False):
+def main(run_config, clear=True):
     """Write data about recalling emails to a csv file"""
     random.seed(0) #for reproduceability
-    time = datetime.datetime.now().isoformat()
+    run_config['time'] = datetime.datetime.now().isoformat()
     steps = round(run_config['max_ratio']/run_config['ratio_step'])
     ratios = tuple((step+1)*run_config['ratio_step'] for step in range(steps))
     try:
@@ -216,57 +244,37 @@ def main(run_config, verbose=False, clear=False):
                 'emails hashed - no bloom',
                 'run info',
             ])
-    print('opening trie...')
     trie = marisa_trie.RecordTrie('I')
     trie.load('marisa.trie')
 
-    print('gathering stats...')
     with shelve.open('emails.shelve') as emails:
-        for ratio in ratios:
-            print('processing ratio {:.5}...'.format(ratio))
-            with Pool() as pool:
-                items = (
-                    (h, i[0], i[1]) for h, i in emails.items() if
-                    run_config['ngram_length'] <= len(i[0]) <= run_config['max_email_len'])
-                results = pool.imap_unordered(
-                    functools.partial(
-                        email_stats,
-                        run_config=run_config,
-                        ratio=ratio,
-                        trie=trie),
-                    items)
-                for result in itertools.islice(results, run_config['sample_size']):
-                    if verbose:
-                        PrettyPrinter().pprint(result)
-                    with open('stats.csv', 'a') as csv_file:
-                        csv.writer(csv_file).writerow([
-                            result['md5'],
-                            result['length'],
-                            '{:.5}'.format(result['ratio']),
-                            result.get('bloom_hashed', ''),
-                            result.get('no_bloom_hashed', ''),
-                            ('time: {}, '
-                             'sample_size: {}, '
-                             'max_email_len: {}, '
-                             'use_bloom_filter: {}, '
-                             'ngram_length: {}, '
-                             'compare_bloom_filter: {}').format(
-                                 time,
-                                 run_config['sample_size'],
-                                 run_config['max_email_len'],
-                                 run_config['use_bloom_filter'],
-                                 run_config['ngram_length'],
-                                 run_config['compare_bloom_filter']),
-                        ])
+        results = [None for i in range(len(ratios))]
+        with Pool() as pool:
+            original_items = itertools.islice(
+                ((h, i[0], i[1]) for h, i in emails.items() if
+                run_config['ngram_length'] <= len(i[0]) <= run_config['max_email_len']), 
+                run_config['sample_size'])        
+            for i, ratio in enumerate(ratios):
+                items, original_items = itertools.tee(original_items)
+                results[i] = pool.imap_unordered(
+                    functools.partial(email_stats, run_config=run_config, ratio=ratio, trie=trie),
+                    items,
+                    chunksize=5)
+            for results_by_ratio in results:
+                for result in results_by_ratio:
+                    print_to_csv(result, run_config)
+
     shutil.rmtree('tmp')
 
+DEFAULT_RUN_CONFIG = {
+    'sample_size':300,
+    'ratio_step':0.1,
+    'max_ratio':0.5,
+    'max_email_len':20,
+    'ngram_length':3,
+    'use_bloom_filter':True,
+    'compare_bloom_filter':True,
+    'verbose':False,}
+
 if __name__ == '__main__':
-    RUN_CONFIG = {
-        'sample_size':100,
-        'ratio_step':0.1,
-        'max_ratio':0.9,
-        'max_len':30,
-        'ngram_length':3,
-        'use_bloom_filter':True,
-        'compare_bloom_filter':True,}
-    main(RUN_CONFIG)
+    main(DEFAULT_RUN_CONFIG, clear=True)
