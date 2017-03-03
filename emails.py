@@ -15,7 +15,7 @@ from collections import defaultdict
 from multiprocessing import Pool
 from pprint import PrettyPrinter
 
-import pybloomfilter
+import pybloom_live
 import marisa_trie
 
 def preprocess(ngram_length=3):
@@ -39,6 +39,7 @@ def preprocess(ngram_length=3):
     ngram_counter = defaultdict(lambda: 0)
     paths = (f[0]+'/'+g for f in os.walk('maildir/') for g in f[2])
     paths = (path for path in paths if os.path.isfile(path))
+    paths = itertools.islice(paths, 100)
 
     print('processing emails...')
     with Pool() as pool:
@@ -49,13 +50,10 @@ def preprocess(ngram_length=3):
         with shelve.open('emails.shelve') as emails:
             for i, (tokens_hash, tokens) in enumerate(email_pipeline):
                 if tokens_hash not in emails:
-                    bloom_filter_path = 'tmp/bloom_'+tokens_hash
-                    bloom_filter = pybloomfilter.BloomFilter(len(tokens), 0.1, bloom_filter_path)
-                    bloom_filter.update(tokens)
-                    bloom_filter.sync()
-                    with open(bloom_filter_path, 'rb') as bloom_filter_file:
-                        emails[tokens_hash] = (tokens, bloom_filter_file.read())
-                    os.remove(bloom_filter_path)
+                    bloom_filter = pybloom_live.BloomFilter(capacity=len(tokens), error_rate=0.1)
+                    for token in tokens:
+                        bloom_filter.add(token)
+                    emails[tokens_hash] = (tokens, bloom_filter)
                 for ngram, count in count_ngrams(tokens, ngram_length).items():
                     ngram_counter[ngram] += count
                 if i%1000 == 0:
@@ -196,12 +194,7 @@ def print_to_csv(result, run_config):
 def email_stats(item, ratio, trie, run_config):
     """Return a dictionary with information about a recalled email"""
     result = {}
-    md5, msg, bloom_filter_bin = item
-    if run_config['use_bloom_filter']:
-        bloom_filter_path = 'tmp/bloom_'+md5
-        with open(bloom_filter_path, 'wb') as bloom_filter_file:
-            bloom_filter_file.write(bloom_filter_bin)
-        bloom_filter = pybloomfilter.BloomFilter.open(bloom_filter_path)
+    md5, msg, bloom_filter = item
     result['md5'] = md5
     result['length'] = len(msg)
     result['ratio'] = ratio
@@ -216,11 +209,6 @@ def email_stats(item, ratio, trie, run_config):
     else:
         result['no_bloom_hashed'] = recall_email(
             tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
-    if run_config['use_bloom_filter']:
-        try:
-            os.remove(bloom_filter_path)
-        except FileNotFoundError:
-            pass
 
     return result
 
