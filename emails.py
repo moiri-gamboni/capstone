@@ -18,6 +18,8 @@ from pprint import PrettyPrinter
 import pybloom_live
 import marisa_trie
 
+from graph import Node
+
 def preprocess(ngram_length=3):
     """Preprocess ENRON emails,
     saving tokenized emails with their hashes in a shelf,
@@ -39,7 +41,7 @@ def preprocess(ngram_length=3):
     ngram_counter = defaultdict(lambda: 0)
     paths = (f[0]+'/'+g for f in os.walk('maildir/') for g in f[2])
     paths = (path for path in paths if os.path.isfile(path))
-    paths = itertools.islice(paths, 100)
+    # paths = itertools.islice(paths, 100)
 
     print('processing emails...')
     with Pool() as pool:
@@ -150,6 +152,64 @@ def make_emails(tokens, trie, bloom_filter, ngram_length, length=None):
             for msg in make_emails(msg, trie, bloom_filter, ngram_length, length):
                 yield msg
 
+def join_graph_level(node_list, ngram_length):
+    unjoined = node_list[:]
+    while len(unjoined) > 0:
+        i = 0
+        while i < len(unjoined[1:]):
+            if unjoined[0].join(unjoined[1+i], ngram_length):
+                unjoined.pop(1+i)
+            else:
+                i += 1
+        unjoined.pop(0)
+
+def make_emails_nr(tokens, trie, bloom_filter, ngram_length):
+    graph_levels = [[] for i in range(len(tokens))]
+    if None in tokens[:ngram_length-1]:
+        possible_ngrams = find_ngrams(tokens[:ngram_length], trie, bloom_filter, ngram_length)
+        for ngram in possible_ngrams:
+            old_node = None
+            for j, gram in enumerate(ngram):
+                if old_node is not None:
+                    new_node = old_node.add_child(gram)
+                else:
+                    new_node = Node(gram)
+                graph_levels[j].append(new_node)
+                old_node = new_node
+        for j in range(2):
+            join_graph_level(graph_levels[ngram_length-2+j], ngram_length)
+        i = ngram_length
+    else:
+        old_node = None
+        for j in range(ngram_length-1):
+            if old_node is not None:
+                new_node = old_node.add_child(tokens[j])
+            else:
+                new_node = Node(tokens[j])
+            graph_levels[j].append(new_node)
+            old_node = new_node
+        i = ngram_length - 1
+
+    while i < len(tokens):
+        token = tokens[i]
+        for node in graph_levels[i-1]:
+            prefix = node.generate_first_ngram(ngram_length-1)
+            if token is None:
+                possible_ngrams = find_ngrams(prefix+[token], trie, bloom_filter, ngram_length)
+                for ngram in possible_ngrams:
+                    new_node = node.add_child(ngram[-1])
+                    graph_levels[i].append(new_node)
+            else:
+                if ' '.join(prefix+[token]) in trie:
+                    new_node = node.add_child(token)
+                    graph_levels[i].append(new_node)
+        join_graph_level(graph_levels[i], ngram_length)
+        i += 1
+
+    for node in graph_levels[-1]:
+        for msg in node.generate_ngrams(len(tokens)):
+            yield msg
+
 def forget_email(tokens, ratio):
     """Return a tokenized string with some reandomly forgotten tokens"""
     email_length = len(tokens)
@@ -160,7 +220,7 @@ def recall_email(tokens, trie, md5, ngram_length, bloom_filter):
     """Return the number of generated emails from a partially forgotten email that were hashed
     before finding the correct one"""
     hashed_count = 0
-    for msg in make_emails(tokens, trie, bloom_filter, ngram_length):
+    for msg in make_emails_nr(tokens, trie, bloom_filter, ngram_length):
         hashed_count += 1
         if md5_hash(msg) == md5:
             return hashed_count
