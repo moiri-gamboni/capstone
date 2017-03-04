@@ -153,17 +153,16 @@ def make_emails(tokens, trie, bloom_filter, ngram_length, length=None):
                 yield msg
 
 def join_graph_level(node_list, ngram_length):
-    unjoined = node_list[:]
+    unjoined = set(node_list)
     while len(unjoined) > 0:
-        i = 0
-        while i < len(unjoined[1:]):
-            if unjoined[0].join(unjoined[1+i], ngram_length):
-                unjoined.pop(1+i)
-            else:
-                i += 1
-        unjoined.pop(0)
+        to_join = unjoined.pop()
+        to_remove = set()
+        for node in unjoined:
+            if to_join.join(node, ngram_length):
+                to_remove.add(node)
+        unjoined -= to_remove
 
-def make_emails_nr(tokens, trie, bloom_filter, ngram_length):
+def make_emails_nr(tokens, trie, bloom_filter, ngram_length, join=False):
     graph_levels = [[] for i in range(len(tokens))]
     if None in tokens[:ngram_length-1]:
         possible_ngrams = find_ngrams(tokens[:ngram_length], trie, bloom_filter, ngram_length)
@@ -176,9 +175,7 @@ def make_emails_nr(tokens, trie, bloom_filter, ngram_length):
                     new_node = Node(gram)
                 graph_levels[j].append(new_node)
                 old_node = new_node
-        for j in range(2):
-            join_graph_level(graph_levels[ngram_length-2+j], ngram_length)
-        i = ngram_length
+        start = ngram_length
     else:
         old_node = None
         for j in range(ngram_length-1):
@@ -188,48 +185,50 @@ def make_emails_nr(tokens, trie, bloom_filter, ngram_length):
                 new_node = Node(tokens[j])
             graph_levels[j].append(new_node)
             old_node = new_node
-        i = ngram_length - 1
+        start = ngram_length - 1
 
-    while i < len(tokens):
+    # x = 0
+    for i in range(start, len(tokens)):
         token = tokens[i]
         for node in graph_levels[i-1]:
-            prefix = node.generate_first_ngram(ngram_length-1)
-            if token is None:
-                possible_ngrams = find_ngrams(prefix+[token], trie, bloom_filter, ngram_length)
-                for ngram in possible_ngrams:
-                    new_node = node.add_child(ngram[-1])
-                    graph_levels[i].append(new_node)
-            else:
-                if ' '.join(prefix+[token]) in trie:
-                    new_node = node.add_child(token)
-                    graph_levels[i].append(new_node)
-        join_graph_level(graph_levels[i], ngram_length)
-        i += 1
+            if len(node.parents) > 0:
+                # x += 1
+                prefix = node.generate_first_ngram(ngram_length-1)
+                if token is None:
+                    possible_ngrams = find_ngrams(prefix+[token], trie, bloom_filter, ngram_length)
+                    for ngram in possible_ngrams:
+                        new_node = node.add_child(ngram[-1])
+                        graph_levels[i].append(new_node)
+                else:
+                    if ' '.join(prefix+[token]) in trie:
+                        new_node = node.add_child(token)
+                        graph_levels[i].append(new_node)
+        if join:
+            join_graph_level(graph_levels[i], ngram_length)
 
-    for node in graph_levels[-1]:
-        for msg in node.generate_ngrams(len(tokens)):
-            yield msg
+    msgs = [msg for node in graph_levels[-1] for msg in node.generate_ngrams(len(tokens))]
+    # print('number of emails:', len(msgs))
+    # print('x', x)
+    return msgs
 
 def forget_email(tokens, ratio):
     """Return a tokenized string with some reandomly forgotten tokens"""
     email_length = len(tokens)
-    forget = random.sample(range(email_length), int((1-ratio)*email_length))
-    return [token if i in forget else None for i, token in enumerate(tokens)]
+    forget = random.sample(range(1, email_length), min(1, int(ratio*email_length)))
+    # with first token possibly forgotten:
+    # forget = random.sample(range(email_length), min(1, int(ratio*email_length)))
+    return [token if i not in forget else None for i, token in enumerate(tokens)]
 
 def recall_email(tokens, trie, md5, ngram_length, bloom_filter):
-    """Return the number of generated emails from a partially forgotten email that were hashed
-    before finding the correct one"""
-    hashed_count = 0
-    for msg in make_emails_nr(tokens, trie, bloom_filter, ngram_length):
-        hashed_count += 1
+    """Return the number of emails generated from a partially forgotten email"""
+    msgs = make_emails_nr(tokens, trie, bloom_filter, ngram_length)
+    for msg in msgs:
         if md5_hash(msg) == md5:
-            return hashed_count
+            return len(msgs)
     #email should always be recalled
     raise Exception('Could not reconstruct email.')
 
 def print_to_csv(result, run_config):
-    if run_config['verbose']:
-        PrettyPrinter().pprint(result)
     with open('stats.csv', 'a') as csv_file:
         csv.writer(csv_file).writerow([
             result['md5'],
@@ -260,6 +259,10 @@ def email_stats(item, ratio, trie, run_config):
     result['ratio'] = ratio
 
     tokens = forget_email(msg, ratio)
+    print(md5)
+    print(msg)
+    print(tokens)
+
     if run_config['use_bloom_filter']:
         result['bloom_hashed'] = recall_email(
             tokens, trie, md5, run_config['ngram_length'], bloom_filter)
@@ -270,9 +273,10 @@ def email_stats(item, ratio, trie, run_config):
         result['no_bloom_hashed'] = recall_email(
             tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
 
+    print('*'*200)
     return result
 
-def main(run_config, clear=True):
+def main(run_config, clear_csv, verbose):
     """Write data about recalling emails to a csv file"""
     random.seed(0) #for reproduceability
     run_config['time'] = datetime.datetime.now().isoformat()
@@ -282,7 +286,7 @@ def main(run_config, clear=True):
         os.mkdir('tmp')
     except FileExistsError:
         pass
-    if not os.path.isfile('stats.csv') or clear:
+    if not os.path.isfile('stats.csv') or clear_csv:
         with open('stats.csv', 'w') as csv_file:
             csv.writer(csv_file).writerow([
                 'md5',
@@ -295,9 +299,9 @@ def main(run_config, clear=True):
     trie = marisa_trie.RecordTrie('I')
     trie.load('marisa.trie')
 
-    with shelve.open('emails.shelve') as emails:
-        results = [None for i in range(len(ratios))]
-        with Pool() as pool:
+    with Pool() as pool:
+        with shelve.open('emails.shelve') as emails:
+            results = [None for i in range(len(ratios))]
             original_items = itertools.islice(
                 ((h, i[0], i[1]) for h, i in emails.items() if
                 run_config['ngram_length'] <= len(i[0]) <= run_config['max_email_len']), 
@@ -310,19 +314,20 @@ def main(run_config, clear=True):
                     chunksize=5)
             for results_by_ratio in results:
                 for result in results_by_ratio:
+                    if verbose:
+                        PrettyPrinter().pprint(result)
                     print_to_csv(result, run_config)
 
     shutil.rmtree('tmp')
 
 DEFAULT_RUN_CONFIG = {
-    'sample_size':300,
+    'sample_size':200,
     'ratio_step':0.1,
     'max_ratio':0.5,
-    'max_email_len':20,
+    'max_email_len':30,
     'ngram_length':3,
     'use_bloom_filter':True,
-    'compare_bloom_filter':True,
-    'verbose':False,}
+    'compare_bloom_filter':True,}
 
 if __name__ == '__main__':
-    main(DEFAULT_RUN_CONFIG, clear=True)
+    main(DEFAULT_RUN_CONFIG, clear_csv=True, verbose=False)
