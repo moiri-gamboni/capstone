@@ -3,7 +3,7 @@ maildir/
 
 #preprocess results
 emails.shelve
-trie.marisa
+marisa.trie
 
 #statistics
 stats.csv

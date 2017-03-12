@@ -130,28 +130,6 @@ def find_ngrams(partial_ngram, trie, bloom_filter, ngram_length):
     ngrams = sorted(ngrams, key=lambda item: item[1][0], reverse=True)
     return [ngram.split(' ') for ngram, v in ngrams]
 
-def make_emails(tokens, trie, bloom_filter, ngram_length, length=None):
-    """Recursively generate possible emails from a partially forgotten email"""
-    if length is None:
-        length = len(tokens)
-    #ngram has not forgotten parts
-    if None not in tokens:
-        yield tokens
-    #email length is equal to ngram length
-    elif len(tokens) == ngram_length:
-        for ngram in find_ngrams(tokens, trie, bloom_filter, ngram_length):
-            yield ngram
-    #only last token is forgotten
-    elif None not in tokens[:-1] and tokens[-1] is None:
-        for ngram in make_emails(tokens[-ngram_length:], trie, bloom_filter, ngram_length, length):
-            yield tokens[:-ngram_length]+ngram
-    #forgotten token(s) are not at the end
-    else:
-        for msg in make_emails(tokens[:-1], trie, bloom_filter, ngram_length, length):
-            msg.append(tokens[-1])
-            for msg in make_emails(msg, trie, bloom_filter, ngram_length, length):
-                yield msg
-
 def join_graph_level(node_list, ngram_length):
     unjoined = set(node_list)
     while len(unjoined) > 0:
@@ -162,7 +140,7 @@ def join_graph_level(node_list, ngram_length):
                 to_remove.add(node)
         unjoined -= to_remove
 
-def make_emails_nr(tokens, trie, bloom_filter, ngram_length, join=False):
+def make_emails_breadth(tokens, trie, bloom_filter, ngram_length, join=False):
     graph_levels = [[] for i in range(len(tokens))]
     if None in tokens[:ngram_length-1]:
         possible_ngrams = find_ngrams(tokens[:ngram_length], trie, bloom_filter, ngram_length)
@@ -211,6 +189,62 @@ def make_emails_nr(tokens, trie, bloom_filter, ngram_length, join=False):
     # print('x', x)
     return msgs
 
+def make_emails_depth(tokens, trie, bloom_filter, ngram_length, join=False):
+    graph_levels = [[] for i in range(len(tokens))]
+
+    if None in tokens[:ngram_length-1]:
+        possible_ngrams = find_ngrams(tokens[:ngram_length], trie, bloom_filter, ngram_length)
+        for ngram in possible_ngrams:
+            old_node = None
+            for j, gram in enumerate(ngram):
+                if old_node is not None:
+                    new_node = old_node.add_child(gram)
+                else:
+                    new_node = Node(gram)
+                graph_levels[j].append(new_node)
+                old_node = new_node
+        start = ngram_length
+    else:
+        old_node = None
+        for j in range(ngram_length-1):
+            if old_node is not None:
+                new_node = old_node.add_child(tokens[j])
+            else:
+                new_node = Node(tokens[j])
+            graph_levels[j].append(new_node)
+            old_node = new_node
+        start = ngram_length - 1
+
+    node_index_list = [0 for i in range(len(tokens))]
+    level = start
+    while node_index_list[0] < len(graph_levels[0]):
+        token = tokens[level]
+        node_index = node_index_list[level-1]
+        parent_node = graph_levels[level-1][node_index]
+        graph_level = graph_levels[level]
+        if len(parent_node.parents) > 0:
+            prefix = parent_node.generate_first_ngram(ngram_length-1)
+            if token is None:
+                possible_ngrams = find_ngrams(prefix+[token], trie, bloom_filter, ngram_length)
+                for ngram in possible_ngrams:
+                    new_node = parent_node.add_child(ngram[-1])
+                    graph_level.append(new_node)
+            else:
+                if ' '.join(prefix+[token]) in trie:
+                    new_node = parent_node.add_child(token)
+                    graph_level.append(new_node)
+        if join:
+            join_graph_level(graph_level, ngram_length)
+        if level == (len(tokens) - 1):
+            node_index += 1
+            if node_index == len(graph_level):
+                level -= 1
+            for node in parent_node.children:
+                for msg in node.generate_ngrams(len(tokens)):
+                    yield msg
+        else:
+            level += 1
+
 def forget_email(tokens, ratio):
     """Return a tokenized string with some reandomly forgotten tokens"""
     email_length = len(tokens)
@@ -221,11 +255,19 @@ def forget_email(tokens, ratio):
 
 def recall_email(tokens, trie, md5, ngram_length, bloom_filter):
     """Return the number of emails generated from a partially forgotten email"""
-    msgs = make_emails_nr(tokens, trie, bloom_filter, ngram_length)
+    msgs = make_emails_depth(tokens, trie, bloom_filter, ngram_length)
+    found = False
+    count = 0
     for msg in msgs:
+        count += 1
+        print(msg)
         if md5_hash(msg) == md5:
-            return len(msgs)
+            found = True
+            if bloom_filter is None:
+                return count
     #email should always be recalled
+    if found:
+        return count
     raise Exception('Could not reconstruct email.')
 
 def print_to_csv(result, run_config):
