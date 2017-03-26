@@ -52,7 +52,7 @@ def preprocess(ngram_length=3):
         with shelve.open('emails.shelve') as emails:
             for i, (tokens_hash, tokens) in enumerate(email_pipeline):
                 if tokens_hash not in emails:
-                    bloom_filter = pybloom_live.BloomFilter(capacity=len(tokens), error_rate=0.1)
+                    bloom_filter = pybloom_live.BloomFilter(capacity=len(set(tokens)), error_rate=0.1)
                     for token in tokens:
                         bloom_filter.add(token)
                     emails[tokens_hash] = (tokens, bloom_filter)
@@ -215,30 +215,30 @@ def make_emails_depth(tokens, trie, bloom_filter, ngram_length, join=False):
             old_node = new_node
         start = ngram_length - 1
 
-    node_index_list = [0 for i in range(len(tokens))]
+    node_indices = [0 for i in range(len(tokens))]
     level = start
-    while node_index_list[0] < len(graph_levels[0]):
+    while node_indices[0] < len(graph_levels[0]):
+        if node_indices[level-1] == len(graph_levels[level-1]):
+            node_indices[level-2] += 1
+            level -= 1
+            continue
         token = tokens[level]
-        node_index = node_index_list[level-1]
-        parent_node = graph_levels[level-1][node_index]
-        graph_level = graph_levels[level]
+        parent_node = graph_levels[level-1][node_indices[level-1]]
         if len(parent_node.parents) > 0:
             prefix = parent_node.generate_first_ngram(ngram_length-1)
             if token is None:
                 possible_ngrams = find_ngrams(prefix+[token], trie, bloom_filter, ngram_length)
                 for ngram in possible_ngrams:
                     new_node = parent_node.add_child(ngram[-1])
-                    graph_level.append(new_node)
+                    graph_levels[level].append(new_node)
             else:
                 if ' '.join(prefix+[token]) in trie:
                     new_node = parent_node.add_child(token)
-                    graph_level.append(new_node)
+                    graph_levels[level].append(new_node)
         if join:
-            join_graph_level(graph_level, ngram_length)
+            join_graph_level(graph_levels[level], ngram_length)
         if level == (len(tokens) - 1):
-            node_index += 1
-            if node_index == len(graph_level):
-                level -= 1
+            node_indices[level-1] += 1
             for node in parent_node.children:
                 for msg in node.generate_ngrams(len(tokens)):
                     yield msg
@@ -253,14 +253,15 @@ def forget_email(tokens, ratio):
     # forget = random.sample(range(email_length), min(1, int(ratio*email_length)))
     return [token if i not in forget else None for i, token in enumerate(tokens)]
 
-def recall_email(tokens, trie, md5, ngram_length, bloom_filter):
+def recall_email(tokens, trie, md5, ngram_length, bloom_filter, verbose=False):
     """Return the number of emails generated from a partially forgotten email"""
     msgs = make_emails_depth(tokens, trie, bloom_filter, ngram_length)
     found = False
     count = 0
     for msg in msgs:
+        if verbose:
+            print(msg)
         count += 1
-        print(msg)
         if md5_hash(msg) == md5:
             found = True
             if bloom_filter is None:
@@ -276,8 +277,12 @@ def print_to_csv(result, run_config):
             result['md5'],
             result['length'],
             '{:.5}'.format(result['ratio']),
-            result.get('bloom_hashed', ''),
-            result.get('no_bloom_hashed', ''),
+            result.get('bloom', ''),
+            result.get('bloom_time', ''),
+            result.get('no_bloom', ''),
+            result.get('no_bloom_time', ''),
+            result['original_email'],
+            result['forgotten_email'],
             ('time: {}, '
              'sample_size: {}, '
              'max_email_len: {}, '
@@ -294,28 +299,40 @@ def print_to_csv(result, run_config):
 
 def email_stats(item, ratio, trie, run_config):
     """Return a dictionary with information about a recalled email"""
+    time_start = datetime.datetime.now()
     result = {}
     md5, msg, bloom_filter = item
+    tokens = forget_email(msg, ratio)
+
     result['md5'] = md5
     result['length'] = len(msg)
     result['ratio'] = ratio
+    result['original_email'] = msg
+    result['forgotten_email'] = tokens
 
-    tokens = forget_email(msg, ratio)
     print(md5)
     print(msg)
     print(tokens)
+    try:
+        if run_config['use_bloom_filter']:
+            result['bloom'] = recall_email(
+                tokens, trie, md5, run_config['ngram_length'], bloom_filter)
+            result['bloom_time'] = (datetime.datetime.now()-time_start).total_seconds()
 
-    if run_config['use_bloom_filter']:
-        result['bloom_hashed'] = recall_email(
-            tokens, trie, md5, run_config['ngram_length'], bloom_filter)
-        if run_config['compare_bloom_filter']:
-            result['no_bloom_hashed'] = recall_email(
+            if run_config['compare_bloom_filter']:
+                result['no_bloom'] = recall_email(
+                    tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
+                result['no_bloom_time'] = (datetime.datetime.now()-time_start).total_seconds()
+        else:
+            result['no_bloom'] = recall_email(
                 tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
-    else:
-        result['no_bloom_hashed'] = recall_email(
-            tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
+            result['no_bloom_time'] = (datetime.datetime.now()-time_start).total_seconds()
+    except:
+        print('Exception while processing:')
+        print(result)
+        raise
 
-    print('*'*200)
+    print('*'*80)
     return result
 
 def main(run_config, clear_csv, verbose):
@@ -334,8 +351,12 @@ def main(run_config, clear_csv, verbose):
                 'md5',
                 'number of tokens',
                 'ratio forgotten',
-                'emails hashed - bloom',
-                'emails hashed - no bloom',
+                'emails generated - bloom',
+                'runtime - bloom',
+                'emails generated - no bloom',
+                'runtime - no bloom',
+                'original email',
+                'forgotten email',
                 'run info',
             ])
     trie = marisa_trie.RecordTrie('I')
@@ -346,14 +367,15 @@ def main(run_config, clear_csv, verbose):
             results = [None for i in range(len(ratios))]
             original_items = itertools.islice(
                 ((h, i[0], i[1]) for h, i in emails.items() if
-                run_config['ngram_length'] <= len(i[0]) <= run_config['max_email_len']), 
+                (run_config['ngram_length'] <= len(i[0]) <= run_config['max_email_len']) and 
+                (run_config['ratio_step'] * len(i[0]) >= 1)), 
                 run_config['sample_size'])        
             for i, ratio in enumerate(ratios):
                 items, original_items = itertools.tee(original_items)
                 results[i] = pool.imap_unordered(
                     functools.partial(email_stats, run_config=run_config, ratio=ratio, trie=trie),
                     items,
-                    chunksize=5)
+                    chunksize=1+int(run_config['sample_size']/os.cpu_count()/len(ratios)))
             for results_by_ratio in results:
                 for result in results_by_ratio:
                     if verbose:
@@ -363,10 +385,10 @@ def main(run_config, clear_csv, verbose):
     shutil.rmtree('tmp')
 
 DEFAULT_RUN_CONFIG = {
-    'sample_size':200,
+    'sample_size':500,
     'ratio_step':0.1,
-    'max_ratio':0.5,
-    'max_email_len':30,
+    'max_ratio':0.9,
+    'max_email_len':200,
     'ngram_length':3,
     'use_bloom_filter':True,
     'compare_bloom_filter':True,}
