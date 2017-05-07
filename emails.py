@@ -11,6 +11,7 @@ import functools
 import re
 import shutil
 import datetime
+import math
 from collections import defaultdict
 from multiprocessing import Pool
 from pprint import PrettyPrinter
@@ -25,10 +26,6 @@ def preprocess(ngram_length=3):
     saving tokenized emails with their hashes in a shelf,
     and ngrams with their count in a trie.
     Must be run before anything else."""
-    try:
-        os.mkdir('tmp')
-    except FileExistsError:
-        pass
     try:
         os.remove('emails.shelve')
     except FileNotFoundError:
@@ -56,8 +53,8 @@ def preprocess(ngram_length=3):
                     for token in tokens:
                         bloom_filter.add(token)
                     emails[tokens_hash] = (tokens, bloom_filter)
-                for ngram, count in count_ngrams(tokens, ngram_length).items():
-                    ngram_counter[ngram] += count
+                    for ngram, count in count_ngrams(tokens, ngram_length).items():
+                        ngram_counter[ngram] += count
                 if i%1000 == 0:
                     print('processing email:', i)
     print('saved emails')
@@ -69,7 +66,6 @@ def preprocess(ngram_length=3):
     print('saving trie...')
     trie.save('marisa.trie')
     print('saved trie')
-    shutil.rmtree('tmp')
 
 def md5_hash(tokens):
     """Return the hex string representation of a md5 hash of a list of tokens"""
@@ -232,12 +228,14 @@ def print_to_csv(result, run_config):
             ('time: {}, '
              'sample_size: {}, '
              'max_email_len: {}, '
+             'email_bins: {}, '
              'use_bloom_filter: {}, '
              'ngram_length: {}, '
              'compare_bloom_filter: {}').format(
                  run_config['time'],
                  run_config['sample_size'],
                  run_config['max_email_len'],
+                 run_config['email_bins'],
                  run_config['use_bloom_filter'],
                  run_config['ngram_length'],
                  run_config['compare_bloom_filter']),
@@ -282,16 +280,28 @@ def email_stats(item, ratio, trie, run_config):
 
     return result
 
+def get_binned_email(run_config, emails):
+    min_email_len = math.ceil(1/run_config['ratio_step'])
+    bin_step = (run_config['max_email_len']-min_email_len)/run_config['email_bins']
+    email_bin_bounds = [int(round(bin_step*i+min_email_len)) for i in range(run_config['email_bins']+1)]
+    cumulative_bin_sizes = [int(round(run_config['sample_size']/run_config['email_bins']*i)) for i in range(run_config['email_bins']+1)]
+    email_bin_sizes = [cumulative_bin_sizes[i]-cumulative_bin_sizes[i-1] for i in range(1,len(cumulative_bin_sizes))]
+    original_items = []
+    for i in range(run_config['email_bins']):
+        new_items = list(itertools.islice(
+            ((h, m[0], m[1]) for h, m in emails.items() if
+            (email_bin_bounds[i] <= len(m[0]) <= email_bin_bounds[i+1])),
+            email_bin_sizes[i]))
+        original_items += new_items
+    return original_items
+
 def main(run_config, clear_csv, verbose):
     """Write data about recalling emails to a csv file"""
     random.seed(0) #for reproduceability
     run_config['time'] = datetime.datetime.now().isoformat()
     steps = round(run_config['max_ratio']/run_config['ratio_step'])
     ratios = tuple((step+1)*run_config['ratio_step'] for step in range(steps))
-    try:
-        os.mkdir('tmp')
-    except FileExistsError:
-        pass
+
     if not os.path.isfile('stats.csv') or clear_csv:
         with open('stats.csv', 'w') as csv_file:
             csv.writer(csv_file).writerow([
@@ -312,13 +322,8 @@ def main(run_config, clear_csv, verbose):
     with Pool() as pool:
         with shelve.open('emails.shelve') as emails:
             results = [None for i in range(len(ratios))]
-            original_items = itertools.islice(
-                ((h, i[0], i[1]) for h, i in emails.items() if
-                (run_config['ngram_length'] <= len(i[0]) <= run_config['max_email_len']) and 
-                (run_config['ratio_step'] * len(i[0]) >= 1)), 
-                run_config['sample_size'])        
+            items = get_binned_email(run_config, emails)
             for i, ratio in enumerate(ratios):
-                items, original_items = itertools.tee(original_items)
                 results[i] = pool.imap_unordered(
                     functools.partial(email_stats, run_config=run_config, ratio=ratio, trie=trie),
                     items,
@@ -329,13 +334,12 @@ def main(run_config, clear_csv, verbose):
                         PrettyPrinter().pprint(result)
                     print_to_csv(result, run_config)
 
-    shutil.rmtree('tmp')
-
 DEFAULT_RUN_CONFIG = {
     'sample_size':500,
     'ratio_step':0.1,
     'max_ratio':0.9,
     'max_email_len':200,
+    'email_bins': 10,
     'ngram_length':3,
     'use_bloom_filter':True,
     'compare_bloom_filter':True,
