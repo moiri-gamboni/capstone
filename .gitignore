@@ -1,9 +1,12 @@
+#macOS
+.DS_Store
+
 #raw ENRON dataset
 maildir/
 
 #preprocess results
-emails.shelve
-marisa.trie
+emails_*.shelve
+marisa_*.trie
 
 #statistics
 stats.csv

@@ -15,29 +15,28 @@ import math
 from collections import defaultdict
 from multiprocessing import Pool
 from pprint import PrettyPrinter
+from nltk.tokenize.moses import MosesTokenizer, MosesDetokenizer
 
 import pybloom_live
 import marisa_trie
 
 from graph import Node
 
-def preprocess(ngram_length=3):
+def preprocess_emails(tokenizer='split'):
     """Preprocess ENRON emails,
     saving tokenized emails with their hashes in a shelf,
     and ngrams with their count in a trie.
     Must be run before anything else."""
-    try:
-        os.remove('emails.shelve')
-    except FileNotFoundError:
-        pass
-    try:
-        os.remove('marisa.trie')
-    except FileNotFoundError:
-        pass
 
-    ngram_counter = defaultdict(lambda: 0)
+    shelf_filename = 'emails_{}.shelve'.format(tokenizer)
+    try:
+        os.remove(shelf_filename)
+    except FileNotFoundError:
+        pass
+    
     paths = (f[0]+'/'+g for f in os.walk('maildir/') for g in f[2])
     paths = (path for path in paths if os.path.isfile(path))
+    paths, paths_ = itertools.tee(paths)
     # paths = itertools.islice(paths, 100)
 
     print('processing emails...')
@@ -45,31 +44,56 @@ def preprocess(ngram_length=3):
         email_pipeline = pool.imap_unordered(email_to_str_list, paths)
         email_pipeline = (thread for thread in email_pipeline if thread is not None)
         email_pipeline = (msg for thread in email_pipeline for msg in thread)
-        email_pipeline = pool.imap_unordered(tokenize_email, email_pipeline)
-        with shelve.open('emails.shelve') as emails:
+        email_pipeline = pool.imap_unordered(functools.partial(tokenize, tokenizer=tokenizer), email_pipeline)
+        email_count = 0
+        unique_email_count = 0
+        with shelve.open(shelf_filename) as emails:
             for i, (tokens_hash, tokens) in enumerate(email_pipeline):
                 if tokens_hash not in emails:
                     bloom_filter = pybloom_live.BloomFilter(capacity=len(set(tokens)), error_rate=0.1)
                     for token in tokens:
                         bloom_filter.add(token)
                     emails[tokens_hash] = (tokens, bloom_filter)
-                    for ngram, count in count_ngrams(tokens, ngram_length).items():
-                        ngram_counter[ngram] += count
+                    unique_email_count += 1
                 if i%1000 == 0:
                     print('processing email:', i)
-    print('saved emails')
+                email_count += 1
 
+    print('saved emails')
+    print('total emails: {}'.format(len(list(paths_))))
+    print('total parsed emails: {}'.format(email_count))
+    print('unique parsed emails: {}'.format(unique_email_count))
+
+def build_trie(ngram_length=3, tokenizer='split'):
+    trie_filename = 'marisa_{}.trie'.format(tokenizer)
+    try:
+        os.remove(trie_filename)
+    except FileNotFoundError:
+        pass
+
+    ngram_counter = defaultdict(lambda: 0)
+    i = 0
+    with shelve.open('emails_{}.shelve'.format(tokenizer)) as emails:
+        for h in emails:
+            i += 1
+            tokens, _ = emails[h]
+            for ngram, count in count_ngrams(tokens, ngram_length).items():
+                ngram_counter[ngram] += count
+            if i%1000 == 0:
+                    print('processing email:', i)
+                    
+    print('unique n-grams: {}'.format(len(ngram_counter)))
     print('building trie...')
     trie = marisa_trie.RecordTrie(
         'I',
         ((k, (v,)) for k, v in ngram_counter.items()), order=marisa_trie.WEIGHT_ORDER)
     print('saving trie...')
-    trie.save('marisa.trie')
+    trie.save(trie_filename)
     print('saved trie')
 
-def md5_hash(tokens):
-    """Return the hex string representation of a md5 hash of a list of tokens"""
-    return hashlib.md5(' '.join(tokens).encode('utf-8')).hexdigest()
+def md5_hash(msg):
+    """Return the hex string representation of a md5 hash of a string"""
+    return hashlib.md5(msg.encode('utf-8')).hexdigest()
 
 def email_to_str_list(path):
     """Return the emails in an email thread file as strings"""
@@ -81,11 +105,23 @@ def email_to_str_list(path):
         except UnicodeDecodeError:
             print('cannot parse:', path)
 
-def tokenize_email(msg):
+def tokenize(msg, tokenizer):
     """Return the tokens from a string"""
-    tokens = re.split(r'\s+', msg)
-    tokens = [token for token in tokens if token != '']
-    return (md5_hash(tokens), tokens)
+    if tokenizer == 'simple':
+        tokens = msg.split(' ')
+    elif tokenizer == 'split':
+        tokens = msg.split()
+    elif tokenizer == 'moses':
+        tokens = MosesDetokenizer().unescape_xml(MosesTokenizer().tokenize(msg, return_str=True)).split(' ')
+    return (md5_hash(detokenize(tokens, tokenizer)), tokens)
+
+def detokenize(tokens, tokenizer):
+    """Return the tokens from a string"""
+    if tokenizer == 'simple' or tokenizer == 'split':
+        msg = ' '.join(tokens)
+    elif tokenizer == 'moses':
+        msg = MosesDetokenizer().detokenize(tokens, return_str=True)
+    return msg
 
 def count_ngrams(tokens, ngram_length):
     """Return a dictonary with ngrams as keys and their occurences as values"""
@@ -101,7 +137,7 @@ def tokens_to_ngrams(tokens, ngram_length):
         for j in range(len(ngram)):
             yield ngram[:j+1]
 
-def find_ngrams(partial_ngram, trie, bloom_filter, ngram_length):
+def find_ngrams(partial_ngram, bloom_filter, ngram_length):
     """Return ngrams from a trie that match a partially forgotten ngram"""
     #split ngram into known-(partially) unkown part
     try:
@@ -139,10 +175,10 @@ def join_graph_level(node_list, ngram_length):
                 to_remove.add(node)
         unjoined -= to_remove
 
-def make_emails(tokens, trie, bloom_filter, ngram_length):
+def make_emails(tokens, bloom_filter, ngram_length):
     graph_levels = [[] for i in range(len(tokens))]
 
-    possible_ngrams = find_ngrams(tokens[:ngram_length], trie, bloom_filter, ngram_length)
+    possible_ngrams = find_ngrams(tokens[:ngram_length], bloom_filter, ngram_length)
     for ngram in possible_ngrams:
         old_node = None
         for j, gram in enumerate(ngram):
@@ -168,7 +204,7 @@ def make_emails(tokens, trie, bloom_filter, ngram_length):
             prefix = parent_node.generate_first_ngram(ngram_length-1)
             # generate n-grams
             if token is None:
-                possible_ngrams = find_ngrams(prefix+[token], trie, bloom_filter, ngram_length)
+                possible_ngrams = find_ngrams(prefix+[token], bloom_filter, ngram_length)
                 for ngram in possible_ngrams:
                     new_node = parent_node.add_child(ngram[-1])
                     graph_levels[level].append(new_node)
@@ -182,29 +218,26 @@ def make_emails(tokens, trie, bloom_filter, ngram_length):
         if level == (len(tokens) - 1):
             node_indices[level-1] += 1
             for node in parent_node.children:
-                for msg in node.generate_ngrams(len(tokens)):
-                    yield msg
+                yield from node.generate_ngrams(len(tokens))
         else:
             level += 1
 
 def forget_email(tokens, ratio):
-    """Return a tokenized string with some reandomly forgotten tokens"""
+    """Return a tokenized string with some randomly forgotten tokens"""
     email_length = len(tokens)
     # if we don't want to forget the first token:
-    #forget = random.sample(range(1, email_length), min(1, int(ratio*email_length)))
+    # forget = random.sample(range(1, email_length), min(1, int(ratio*email_length)))
     forget = random.sample(range(email_length), max(1, int(ratio*email_length)))
     return [token if i not in forget else None for i, token in enumerate(tokens)]
 
-def recall_email(tokens, trie, md5, ngram_length, bloom_filter, verbose=False):
+def recall_email(tokens, md5, ngram_length, bloom_filter, tokenizer):
     """Return the number of emails generated from a partially forgotten email"""
-    msgs = make_emails(tokens, trie, bloom_filter, ngram_length)
+    msgs = make_emails(tokens, bloom_filter, ngram_length)
     found = False
     count = 0
     for msg in msgs:
-        if verbose:
-            print(msg)
         count += 1
-        if md5_hash(msg) == md5:
+        if md5_hash(detokenize(msg, tokenizer)) == md5:
             found = True
             if bloom_filter is None:
                 return count
@@ -226,6 +259,7 @@ def print_to_csv(result, run_config):
             result['original_email'],
             result['forgotten_email'],
             ('time: {}, '
+             'tokenizer: {}, '
              'sample_size: {}, '
              'max_email_len: {}, '
              'email_bins: {}, '
@@ -233,6 +267,7 @@ def print_to_csv(result, run_config):
              'ngram_length: {}, '
              'compare_bloom_filter: {}').format(
                  run_config['time'],
+                 run_config['tokenizer'],
                  run_config['sample_size'],
                  run_config['max_email_len'],
                  run_config['email_bins'],
@@ -241,7 +276,7 @@ def print_to_csv(result, run_config):
                  run_config['compare_bloom_filter']),
         ])
 
-def email_stats(item, ratio, trie, run_config):
+def email_stats(item, ratio, run_config):
     """Return a dictionary with information about a recalled email"""
     time_start = datetime.datetime.now()
     result = {}
@@ -254,24 +289,19 @@ def email_stats(item, ratio, trie, run_config):
     result['original_email'] = msg
     result['forgotten_email'] = tokens
 
-    print(md5)
-    print(msg)
-    print(tokens)
-    print('*'*80)
-
     try:
         if run_config['use_bloom_filter']:
             result['bloom'] = recall_email(
-                tokens, trie, md5, run_config['ngram_length'], bloom_filter)
+                tokens, md5, run_config['ngram_length'], bloom_filter, tokenizer=run_config['tokenizer'])
             result['bloom_time'] = (datetime.datetime.now()-time_start).total_seconds()
 
             if run_config['compare_bloom_filter']:
                 result['no_bloom'] = recall_email(
-                    tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
+                    tokens, md5, run_config['ngram_length'], bloom_filter=None, tokenizer=run_config['tokenizer'])
                 result['no_bloom_time'] = (datetime.datetime.now()-time_start).total_seconds()
         else:
             result['no_bloom'] = recall_email(
-                tokens, trie, md5, run_config['ngram_length'], bloom_filter=None)
+                tokens, md5, run_config['ngram_length'], bloom_filter=None, tokenizer=run_config['tokenizer'])
             result['no_bloom_time'] = (datetime.datetime.now()-time_start).total_seconds()
     except:
         print('Exception while processing:')
@@ -295,8 +325,10 @@ def get_binned_email(run_config, emails):
         original_items += new_items
     return original_items
 
+trie = None
 def main(run_config, clear_csv, verbose):
     """Write data about recalling emails to a csv file"""
+    global trie
     random.seed(0) #for reproduceability
     run_config['time'] = datetime.datetime.now().isoformat()
     steps = round(run_config['max_ratio']/run_config['ratio_step'])
@@ -317,25 +349,31 @@ def main(run_config, clear_csv, verbose):
                 'run info',
             ])
     trie = marisa_trie.RecordTrie('I')
-    trie.load('marisa.trie')
+    trie.load('marisa_{}.trie'.format(run_config['tokenizer']))
 
-    with Pool() as pool:
-        with shelve.open('emails.shelve') as emails:
-            results = [None for i in range(len(ratios))]
-            items = get_binned_email(run_config, emails)
-            for i, ratio in enumerate(ratios):
-                results[i] = pool.imap_unordered(
-                    functools.partial(email_stats, run_config=run_config, ratio=ratio, trie=trie),
-                    items,
-                    chunksize=1+int(run_config['sample_size']/os.cpu_count()/len(ratios)))
-            for results_by_ratio in results:
-                for result in results_by_ratio:
-                    if verbose:
-                        PrettyPrinter().pprint(result)
-                    print_to_csv(result, run_config)
+    print('getting email sample')
+    items = None
+    with shelve.open('emails_{}.shelve'.format(run_config['tokenizer'])) as emails:
+        items = get_binned_email(run_config, emails)
+
+    print('processing emails')
+    for ratio in ratios:
+        with Pool() as pool:
+            i = 0
+            results = pool.imap_unordered(
+                functools.partial(email_stats, run_config=run_config, ratio=ratio),
+                items,
+                chunksize=5)
+            for result in results:
+                i += 1
+                print('processed: {:.2f}%'.format(100*i/run_config['sample_size']))
+                if verbose:
+                    PrettyPrinter().pprint(result)
+                print_to_csv(result, run_config)
 
 DEFAULT_RUN_CONFIG = {
-    'sample_size':500,
+    'tokenizer':'simple',
+    'sample_size':100,
     'ratio_step':0.1,
     'max_ratio':0.9,
     'max_email_len':200,
