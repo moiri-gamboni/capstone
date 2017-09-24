@@ -6,8 +6,11 @@ maildir/
 
 #preprocess results
 emails_*.shelve
-marisa_*.trie
-marisa_*.reverse_trie
+trie_*
+reverse_trie_*
+
+#logs
+tmp/
 
 #statistics
 stats.csv
