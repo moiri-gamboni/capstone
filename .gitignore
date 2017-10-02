@@ -6,14 +6,19 @@ maildir/
 
 #preprocess results
 emails_*.shelve
+sample_*.shelve
 trie_*
 reverse_trie_*
 
 #logs
-tmp/
+stats*.csv
 
-#statistics
-stats.csv
+#graphs
+graphs/
+
+#tmp
+nohup.out
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

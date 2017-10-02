@@ -22,13 +22,33 @@ from nltk.tokenize.moses import MosesTokenizer, MosesDetokenizer
 import pybloom_live
 import marisa_trie
 
-def get_paths(tokenizer, ngram_length=None, bloom_error_rate=None):
+def get_paths(run_data):
     filepath = {}
-    if bloom_error_rate is not None:
-        filepath['shelf'] = 'emails_{}_{:.5f}.shelve'.format(tokenizer, bloom_error_rate)
-    if ngram_length is not None:
-        filepath['reverse_trie'] = 'reverse_trie_{}_{}'.format(tokenizer, ngram_length)
-        filepath['trie'] = 'trie_{}_{}'.format(tokenizer, ngram_length)
+    try:
+        filepath['shelf'] = 'emails_{}_{:.5f}.shelve'.format(
+            run_data['tokenizer'], run_data['bloom_error_rate'])
+    except KeyError:
+        pass
+    try:
+        filepath['reverse_trie'] = 'reverse_trie_{}_{}'.format(
+            run_data['tokenizer'], run_data['ngram_length'])
+        filepath['trie'] = 'trie_{}_{}'.format(
+            run_data['tokenizer'], run_data['ngram_length'])
+    except KeyError:
+        pass
+    sample_data = (
+        'tokenizer',
+        'sample_size',
+        'ratio_step',
+        'max_ratio',
+        'max_email_len',
+        'total_email_bins',
+        'ngram_length',)
+    try:
+        filepath['sample'] = ('sample' + '_{}'*len(sample_data) + '.shelve').format(
+            *(run_data[d] for d in sample_data))
+    except KeyError:
+        pass
     return filepath
 
 def preprocess_emails(tokenizer, bloom_error_rate):
@@ -37,7 +57,8 @@ def preprocess_emails(tokenizer, bloom_error_rate):
     and ngrams with their count in a trie.
     Must be run before anything else."""
 
-    shelf_filename = get_paths(tokenizer, bloom_error_rate=bloom_error_rate)['shelf']
+    shelf_filename = get_paths(
+        {'tokenizer':tokenizer, 'bloom_error_rate':bloom_error_rate})['shelf']
     if os.path.isfile(shelf_filename):
         os.remove(shelf_filename)
     
@@ -74,7 +95,8 @@ def preprocess_emails(tokenizer, bloom_error_rate):
     print('unique parsed emails: {}'.format(unique_email_count))
 
 def build_trie(ngram_length, tokenizer):
-    paths = get_paths(tokenizer, ngram_length=ngram_length)
+    paths = get_paths(
+        {'tokenizer':tokenizer, 'ngram_length':ngram_length})
     for reverse in (True, False):
         if reverse:
             trie_filename = paths['reverse_trie']
@@ -129,8 +151,7 @@ def tokenize(msg, tokenizer):
     elif tokenizer == 'split':
         tokens = msg.split()
     elif tokenizer == 'moses':
-        md = MosesDetokenizer()
-        tokens = md.unescape_xml(md.tokenize(msg, return_str=True)).split(' ')
+        tokens = MosesDetokenizer().unescape_xml(MosesTokenizer().tokenize(msg, return_str=True)).split(' ')
     return (md5_hash(detokenize(tokens, tokenizer)), tokens)
 
 def detokenize(tokens, tokenizer):
@@ -165,7 +186,10 @@ def find_ngrams(partial_ngram, bloom_filter, ngram_length, trie):
     else:
         prefix = partial_ngram[:forgotten_indices[0]]
     # get ngrams from trie
-    ngrams = trie.iteritems(' '.join(prefix)+' ')
+    if len(prefix) == 0:
+        ngrams = trie.iteritems()
+    else:
+        ngrams = trie.iteritems(' '.join(prefix)+' ')
     # filter ngrams by length
     ngrams = ((gram.split(' '), count) for gram, (count,) in ngrams)
     ngrams = ((gram, _) for gram, _ in ngrams if len(gram) == ngram_length)
@@ -190,15 +214,45 @@ def get_node_ngram(node, ngram_length):
         tmp = tmp[1]
     return ngram
 
-def count_emails(item, run_data, use_bloom_filter):
-    count = 0
-    for msg in make_emails(item, run_data, use_bloom_filter):
-        count += 1
+def split_independent_parts(tokens, ngram_length):
+    forgotten_indices = [i for i, token in enumerate(tokens) if token is None]
+    tmp_ranges = [(i-(ngram_length-1), i+(ngram_length-1)) for i in forgotten_indices]
+    combined_ranges = []
+    current_range = tmp_ranges[0]
+    for r in tmp_ranges:
+        if current_range[1] - r[0] >= ngram_length - 1:
+            current_range = (current_range[0], r[1])
+        else:
+            combined_ranges.append(current_range)
+            current_range = r
+    combined_ranges.append(current_range)
+    if combined_ranges[0][0] < 0:
+        combined_ranges[0] = (0, combined_ranges[0][1])
+    if combined_ranges[-1][1] >= len(tokens):
+        combined_ranges[-1] = (combined_ranges[-1][0], len(tokens)-1)
+    split_emails = [tokens[r[0]:r[1]+1] for r in combined_ranges]
+    return split_emails
+
+def count_emails(item, run_data):
+    count = 1
+    split_emails = split_independent_parts(item['forgotten_email'], run_data['ngram_length'])
+    for msg in split_emails:
+        tmp_count = 0
+        new_item = item.copy()
+        new_item['forgotten_email'] = msg
+        new_item['length'] = len(msg)
+        new_item['original_email'] = None
+        new_item['md5'] = None
+        for msg in make_emails(new_item, run_data):
+            tmp_count += 1
+        count *= tmp_count
+        if count >= run_data['max_emails_generated']:
+            return -1
     return count
 
-def make_emails(item, run_data, use_bloom_filter):
+def make_emails(item, run_data):
     tokens = item['forgotten_email']
-    if use_bloom_filter:
+    if run_data['use_bloom_filter']:
         bloom_filter = item['bloom_filter']
     else:
         bloom_filter = None
@@ -228,288 +282,230 @@ def make_emails(item, run_data, use_bloom_filter):
                 graph_levels[j].append(new_node)
             old_node = new_node
 
-    level = ngram_length
-    while any(len(graph_levels[i]) > 0 for i in range(ngram_length)):
-        # if we have gone through all parents, pop grand-parent and go back one level
-        if len(graph_levels[level-1]) == 0:
-            graph_levels[level-2].pop()
-            level -= 1
-            continue
-        token = tokens[level]
-        parent_node = graph_levels[level-1][-1]
-        target_ngram = get_node_ngram(parent_node, ngram_length-1)+[token]
-        # generate n-grams
-        if token is None:
-            possible_ngrams = find_ngrams(
-                target_ngram, bloom_filter, ngram_length, run_data['trie'])
-            for ngram in possible_ngrams:
-                new_node = (ngram[-1], parent_node)
-                graph_levels[level].append(new_node)
-        # forward filtering
-        else:
-            if ' '.join(target_ngram) in run_data['trie']:
-                new_node = (token, parent_node)
-                graph_levels[level].append(new_node)
-            else:
-                graph_levels[level-1].pop()
+    if len(tokens) > ngram_length:
+        level = ngram_length
+        while any(len(graph_levels[i]) > 0 for i in range(ngram_length)):
+            # if we have gone through all parents, pop grand-parent and go back one level
+            if len(graph_levels[level-1]) == 0:
+                graph_levels[level-2].pop()
+                level -= 1
                 continue
-        # if we have reached the end of the tokens, generate emails,
-        # pop parent, and go back one level
-        if level == (len(tokens) - 1):
-            while len(graph_levels[-1]) > 0:
-                node = graph_levels[-1].pop()
-                msg = get_node_ngram(node, len(tokens))
-                for i, t in enumerate(msg):
-                    if tokens[i] is not None and t != tokens[i]:
-                        raise Exception(tokens, msg, 'Generated email does not match original')
-                yield msg
-            graph_levels[-2].pop()
-        else:
-            level += 1
+            token = tokens[level]
+            parent_node = graph_levels[level-1][-1]
+            target_ngram = get_node_ngram(parent_node, ngram_length-1)+[token]
+            # generate n-grams
+            if token is None:
+                possible_ngrams = find_ngrams(
+                    target_ngram, bloom_filter, ngram_length, run_data['trie'])
+                for ngram in possible_ngrams:
+                    new_node = (ngram[-1], parent_node)
+                    graph_levels[level].append(new_node)
+            # forward filtering
+            else:
+                if ' '.join(target_ngram) in run_data['trie']:
+                    new_node = (token, parent_node)
+                    graph_levels[level].append(new_node)
+                else:
+                    graph_levels[level-1].pop()
+                    continue
+            # if we have reached the end of the tokens, generate emails,
+            # pop parent, and go back one level
+            if level == (len(tokens) - 1):
+                while len(graph_levels[-1]) > 0:
+                    node = graph_levels[-1].pop()
+                    msg = get_node_ngram(node, len(tokens))
+                    for i, t in enumerate(msg):
+                        if tokens[i] is not None and t != tokens[i]:
+                            raise Exception(tokens, msg, 'Generated email does not match original')
+                    yield msg
+                graph_levels[-2].pop()
+            else:
+                level += 1
+    else:
+        while len(graph_levels[-1]) > 0:
+            node = graph_levels[-1].pop()
+            msg = get_node_ngram(node, len(tokens))
+            for i, t in enumerate(msg):
+                if tokens[i] is not None and t != tokens[i]:
+                    raise Exception(tokens, msg, 'Generated email does not match original')
+            yield msg
 
 def forget_email(tokens, ratio):
     """Return a tokenized string with some randomly forgotten tokens"""
     email_length = len(tokens)
-    forget = random.sample(range(email_length), max(1, int(ratio*email_length)))
+    forget = random.sample(range(email_length), max(1, int(ratio/100*email_length)))
     return [token if i not in forget else None for i, token in enumerate(tokens)]
 
 def recall_email(item, run_data):
     """Return the number of emails generated from a partially forgotten email"""
-    items = []
-    if run_data['compare_bloom_filter']:
-        bloom_filter_options = (True, False)
-    else:
-        bloom_filter_options = (run_data['use_bloom_filter'],)
-    if run_data['use_hash'] or run_data['compare_hash']:
-        for use_bloom_filter in bloom_filter_options:
-            time_start = datetime.datetime.now()
-            msgs = make_emails(item, run_data, use_bloom_filter=use_bloom_filter)
-            count = 0
-            found_duplicate = False
-            using_hash = True
-            reached_max = False
-            md5s = set()
-            with open('tmp/{}'.format(item['md5']), 'w') as f:
-                for msg in msgs:
-                    count += 1
-                    if count == run_data['max_emails_generated']:
-                        # only add item if we haven't already found a matching email
-                        if using_hash:
-                            new_item = item.copy()
-                            new_item['use_bloom_filter'] = use_bloom_filter
-                            new_item['use_hash'] = True
-                            new_item['runtime'] = -1
-                            new_item['count'] = -1
-                            items.append(new_item)
-                        print('reached max', item['md5'])
-                        reached_max = True
-                        break
-                    json.dump(msg, f)
-                    f.write('\n')
-                    test_md5 = md5_hash(detokenize(msg, run_data['tokenizer']))
-                    if test_md5 in md5s:
-                        # raise Exception((item['md5'], msg, 'Duplicate email generated'))
-                        print('DUPLICATE EMAIL GENERATED')
-                        print(item['md5'])
-                        found_duplicate = True
-                    else:
-                        md5s.add(test_md5)
-                    if item['md5'] == test_md5:
-                        runtime = (datetime.datetime.now()-time_start).total_seconds()
-                        new_item = item.copy()
-                        new_item['use_bloom_filter'] = use_bloom_filter
-                        new_item['use_hash'] = True
-                        new_item['runtime'] = runtime
-                        new_item['count'] = count
-                        items.append(new_item)
-                        using_hash = False
-                        if not run_data['compare_hash']:
-                            break
-            if run_data['compare_hash']:
-                new_item = item.copy()
-                new_item['use_bloom_filter'] = use_bloom_filter
-                new_item['use_hash'] = False
-                if reached_max:
-                    new_item['count'] = -1
-                else:
-                    new_item['count'] = count
-                items.append(new_item)
-            if not found_duplicate:
-                try:
-                    os.remove('tmp/{}'.format(item['md5']))
-                except FileNotFoundError as e:
-                    print(e)
-    else:
-        for use_bloom_filter in bloom_filter_options:
-            count = count_emails(item, run_data, use_bloom_filter=use_bloom_filter)
-            if count > run_data['max_emails_generated']:
-                new_item = item.copy()
-                new_item['use_bloom_filter'] = use_bloom_filter
-                new_item['use_hash'] = False
+    new_item = item.copy()
+    time_start = datetime.datetime.now()
+    if run_data['use_hash']:
+        msgs = make_emails(item, run_data)
+        count = 0
+        md5s = set()
+        for msg in msgs:
+            count += 1
+            if count == run_data['max_emails_generated']:
+                new_item['runtime'] = -1
                 new_item['count'] = -1
-                items.append(new_item)
-                print('reached max', item['md5'])
+                return new_item
+            test_md5 = md5_hash(detokenize(msg, run_data['tokenizer']))
+            if test_md5 in md5s:
+                raise Exception((item, 'Duplicate email generated'))
             else:
-                new_item = item.copy()
-                new_item['use_bloom_filter'] = use_bloom_filter
-                new_item['use_hash'] = False
+                md5s.add(test_md5)
+            if item['md5'] == test_md5:
+                runtime = (datetime.datetime.now()-time_start).total_seconds()
+                new_item['runtime'] = runtime
                 new_item['count'] = count
-                items.append(new_item)
-    return items
-
-def email_stats(item, ratio, run_data):
-    """Return a dictionary with information about a recalled email"""
-    item['length'] = len(item['original_email'])
-    item['ratio'] = ratio
-    item['forgotten_email'] = forget_email(item['original_email'], ratio)
-    items = recall_email(item, run_data)
-    return items
+                return new_item
+        raise Exception((item, 'No email matched hash'))
+    else:
+        count = count_emails(item, run_data)
+        runtime = (datetime.datetime.now()-time_start).total_seconds()
+        new_item['count'] = count
+        if count == -1:
+            new_item['runtime'] = -1
+        else:
+            new_item['runtime'] = runtime
+        return new_item
 
 def print_to_csv(item, run_data):
-    with open('stats.csv', 'a') as csv_file:
-        csv.writer(csv_file).writerow([
-            item['md5'],
-            '{:.5f}'.format(item['ratio']),
-            item['count'],
-            item.get('runtime', ''),
-            item['use_bloom_filter'],
-            item['use_hash'],
-            item['original_email'],
-            item['forgotten_email'],
-            item['length'],
-            run_data['start_time'],
-            run_data['ngram_length'],
-            run_data['tokenizer'],
-            run_data['compare_bloom_filter'],
-            run_data['compare_hash'],
-            run_data['max_email_len'],
-            run_data['email_bins'],
-            run_data['sample_size'],
-            run_data['multiprocess'],
-            run_data['bloom_error_rate'],
-            run_data['max_emails_generated'],
-        ])
+    try:
+        with open('stats_{}.csv'.format(run_data['start_time']), 'a') as csv_file:
+            csv.writer(csv_file).writerow([
+                item['md5'],
+                item['ratio'],
+                item['count'],
+                item['runtime'],
+                item['original_email'],
+                item['forgotten_email'],
+                item['length'],
+                run_data['start_time'],
+                run_data['tokenizer'],
+                run_data['sample_size'],
+                run_data['ratio_step'],
+                run_data['max_ratio'],
+                run_data['max_email_len'],
+                run_data['total_email_bins'],
+                run_data['ngram_length'],
+                run_data['bloom_error_rate'],
+                run_data['use_bloom_filter'],
+                run_data['use_hash'],
+                run_data['max_emails_generated'],
+            ])
+    except Exception as e:
+        print(item)
+        print(e)
 
 def get_binned_emails(emails, run_data):
-    min_email_len = math.ceil(1/run_data['ratio_step'])
-    bin_step = (run_data['max_email_len']-min_email_len)/run_data['email_bins']
+    min_email_len = math.ceil(100/run_data['ratio_step'])
+    bin_step = (run_data['max_email_len']-min_email_len)/run_data['total_email_bins']
     email_bin_bounds = [
         int(round(bin_step*i+min_email_len)) 
-        for i in range(run_data['email_bins']+1)]
+        for i in range(run_data['total_email_bins']+1)]
     cumulative_bin_sizes = [
-        int(round(run_data['sample_size']/run_data['email_bins']*i)) 
-        for i in range(run_data['email_bins']+1)]
+        int(round(run_data['sample_size']/run_data['total_email_bins']*i)) 
+        for i in range(run_data['total_email_bins']+1)]
     email_bin_sizes = [
         cumulative_bin_sizes[i]-cumulative_bin_sizes[i-1] 
         for i in range(1,len(cumulative_bin_sizes))]
     original_items = []
-    for i in range(run_data['email_bins']):
-        new_items = list(itertools.islice(
-            ({'md5': h, 'original_email': m[0], 'bloom_filter': m[1]} for h, m in emails.items() if
-            (email_bin_bounds[i] <= len(m[0]) <= email_bin_bounds[i+1])),
+    for i in range(run_data['total_email_bins']):
+        new_items = (e for e in emails.items() if 
+            email_bin_bounds[i] <= len(e[1][0]) < email_bin_bounds[i+1])
+        new_items = list(itertools.islice((
+            {
+                'md5': h,
+                'original_email': m[0], 
+                'bloom_filter': m[1],
+                'length': len(m[0])
+            } for h, m in new_items),
             email_bin_sizes[i]))
         original_items += new_items
     return original_items
 
+def get_email_sample(run_data, ratios):
+    print('getting email sample')
+    paths = get_paths(run_data)
+    with shelve.open(paths['shelf']) as emails:
+        items = get_binned_emails(emails, run_data)
+    with shelve.open(paths['sample']) as sample:
+        for ratio in ratios:
+            sample_by_ratio = {}
+            for item in items:
+                item['ratio'] = ratio
+                item['forgotten_email'] = forget_email(item['original_email'], ratio)
+                sample_by_ratio[item['md5']] = item
+            sample[str(ratio)] = sample_by_ratio
+
 def main(run_data):
     """Write data about recalling emails to a csv file"""
-    # for reproduceability
-    random.seed(0)
     run_data['start_time'] = datetime.datetime.now().isoformat()
     steps = round(run_data['max_ratio']/run_data['ratio_step'])
     ratios = tuple((step+1)*run_data['ratio_step'] for step in range(steps))
-    if not os.path.isfile('stats.csv'):
-        with open('stats.csv', 'w') as csv_file:
-            csv.writer(csv_file).writerow([
-                'md5',
-                'ratio forgotten',
-                'emails generated',
-                'runtime',
-                'used bloom filter',
-                'used hash',
-                'original email',
-                'forgotten email',
-                'number of tokens',
-                'run start time',
-                'run ngram length',
-                'run tokenizer',
-                'run compared bloom filter',
-                'run compared hash',
-                'run max email length',
-                'run email bins',
-                'run sample size',
-                'run multiprocess',
-                'run bloom filter error rate',
-                'run max emails generated',
-            ])
-    paths = get_paths(
-        run_data['tokenizer'], 
-        ngram_length=run_data['ngram_length'], 
-        bloom_error_rate=run_data['bloom_error_rate'])
+    with open('stats_{}.csv'.format(run_data['start_time']), 'w') as csv_file:
+        csv.writer(csv_file).writerow([
+            'md5',
+            'ratio',
+            'count',
+            'runtime',
+            'original_email',
+            'forgotten_email',
+            'length',
+            'run start_time'
+            'run tokenizer',
+            'run sample_size',
+            'run ratio_step',
+            'run max_ratio',
+            'run max_email_len',
+            'run total_email_bins',
+            'run ngram_length',
+            'run bloom_error_rate',
+            'run use_bloom_filter',
+            'run use_hash',
+            'run max_emails_generated',
+        ])
+    paths = get_paths(run_data)
     if not os.path.isfile(paths['shelf']):
         preprocess_emails(run_data['tokenizer'], run_data['bloom_error_rate'])
     if not os.path.isfile(paths['trie']) or not os.path.isfile(paths['reverse_trie']):
         build_trie(run_data['ngram_length'], run_data['tokenizer'])
+    if not os.path.isfile(paths['sample']):
+        get_email_sample(run_data, ratios)
+
     run_data['trie'] = marisa_trie.RecordTrie('I')
     run_data['trie'].load(paths['trie'])
     run_data['reverse_trie'] = marisa_trie.RecordTrie('I')
     run_data['reverse_trie'].load(paths['reverse_trie'])
 
-    print('getting email sample')
-    items = None
-    with shelve.open(paths['shelf']) as emails:
-        items = get_binned_emails(emails, run_data)
-
-    total_to_process = run_data['sample_size']
-    if run_data['compare_hash']:
-        total_to_process *= 2
-    if run_data['compare_bloom_filter']:
-        total_to_process *= 2
-
-    if run_data['multiprocess']:
+    with shelve.open(paths['sample']) as sample:
         # maxtasksperchild prevents memory leak from growing too much
         with Pool(maxtasksperchild=1) as pool:
             for ratio in ratios:
-                print('processing ratio: {}'.format(ratio))
                 i = 0
-                target = functools.partial(email_stats, ratio=ratio, run_data=run_data)
+                print('processing ratio: {}'.format(ratio))
+                items = sample[str(ratio)].values()
+                target = functools.partial(recall_email, run_data=run_data)
                 processed_items = pool.imap_unordered(target, items)
-                for items in processed_items:
-                    for item in items:
-                        i += 1
-                        print('\tprocessed: {:.2f}%'.format(100*i/total_to_process))
-                        print_to_csv(item, run_data)
-                        # PrettyPrinter().pprint(item)
-
-    else:
-        for ratio in ratios:
-            print('processing ratio: {}'.format(ratio))
-            i = 0
-            target = functools.partial(email_stats, ratio=ratio, run_data=run_data)
-            processed_items = map(target, items)
-            for items in processed_items:
-                for item in items:
+                for item in processed_items:
                     i += 1
-                    print('\tprocessed: {:.2f}%'.format(100*i/total_to_process))
+                    print('\tprocessed: {:.2f}%'.format(100*i/run_data['sample_size']))
                     print_to_csv(item, run_data)
                     # PrettyPrinter().pprint(item)
 
 DEFAULT_RUN_DATA = {
     'tokenizer': 'moses',
     'sample_size': 100,
-    'ratio_step': 0.1,
-    'max_ratio': 0.9,
+    'ratio_step': 10,
+    'max_ratio': 90,
     'max_email_len': 100,
-    'email_bins': 10,
+    'total_email_bins': 9,
     'ngram_length': 3,
-    # ignored if compare_bloom_filter is True
-    'use_bloom_filter': True,
-    'compare_bloom_filter': False,
-    # ignored if compare_hash is True
-    'use_hash': False,
-    'compare_hash': False,
-    'multiprocess': True,
     'bloom_error_rate': 0.01,
+    'use_bloom_filter': True,
+    'use_hash': False,
     'max_emails_generated': 100000,
 }
 
