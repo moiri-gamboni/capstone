@@ -1,17 +1,17 @@
 #macOS
 .DS_Store
 
-#raw ENRON dataset
+#dataset
 maildir/
 
-#preprocess results
-emails_*.shelve
-sample_*.shelve
-trie_*
-reverse_trie_*
+#preprocessing
+emails/
+tries/
+bloom_filters/
+samples/
 
-#logs
-stats*.csv
+#results
+results/
 
 #graphs
 graphs/
