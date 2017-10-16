@@ -31,21 +31,27 @@ def get_paths(run_data):
                 run_data['tokenizer'], run_data['ngram_length'])
             paths['trie'] = 'tries/{}.marisa_trie'.format(option_str)
             paths['reverse_trie'] = 'tries/{}_reversed.marisa_trie'.format(option_str)
-    if 'sample' in run_data:
-        if run_data['sample'] == '':
-            paths['sample'] = 'samples/{}'.format(str(uuid.uuid4()))
+    if 'sample_id' in run_data:
+        if run_data['sample_id'] == '':
+            sample_id = str(uuid.uuid4())
         else:
-            paths['sample'] = 'samples/{}'.format(run_data['sample'])
+            sample_id = run_data['sample_id']
+        paths['sample_id'] = sample_id
+        paths['original_sample'] = 'samples/{}_original'.format(sample_id)
+        if 'forget_method' in run_data:
+            paths['forgotten_sample'] = 'samples/{}_forget-method_{}'.format(
+                sample_id, run_data['forget_method'])
     if 'use_bloom_filter' in run_data and run_data['use_bloom_filter']:
         paths['bloom_filters'] = 'bloom_filters/error_rate_{:.5f}.shelve'.format(
             run_data['bloom_error_rate'])
     if 'start_time' in run_data:
         paths['results'] = 'results/{}'.format(run_data['start_time'])
 
-    for path in paths.values():
-        dirname = os.path.dirname(path)
-        if not os.path.exists(dirname):
-            os.mkdir(dirname)
+    for path_type, path in paths.items():
+        if path_type != 'sample_id':
+            dirname = os.path.dirname(path)
+            if not os.path.exists(dirname):
+                os.mkdir(dirname)
 
     return paths
 
@@ -141,8 +147,8 @@ def save_tries(run_data):
         print('\tfinished building trie')
         print('unique n-grams: {}'.format(len(ngram_counter)))
 
-def save_sample(run_data):
-    print('getting email sample')
+def save_original_sample(run_data):
+    print('sampling original emails')
     paths = get_paths(run_data)
     bins = [{} for bin in run_data['bin_bounds']]
 
@@ -156,23 +162,34 @@ def save_sample(run_data):
             if all(len(bin_) == run_data['bin_size'] for bin_ in bins):
                 break
 
-    with shelve.open(paths['sample']) as sample:
-        for i, ratio in enumerate(run_data['ratios']):
-            sample_by_ratio = {}
-            for (md5, tokens) in bins[i].items():
-                item = {
-                    'md5': md5,
-                    'original_email': tokens,
-                    'length': len(tokens),
-                    'ratio': ratio,
-                    'forgotten_email': forget_email(tokens, ratio),
-                    'bloom_filter': None
-                }
-                sample_by_ratio[md5] = item
-            sample[str(ratio)] = sample_by_ratio
+    with shelve.open(paths['original_sample']) as sample:
+        for (md5, tokens) in bins[i].items():
+            sample[md5] = tokens
+    print('original emails sampled')
 
-    print('email sample saved at: {}'.format(paths['sample']))
-    return paths['sample']
+def save_forgotten_sample(run_data):
+    print('sampling forgotten emails')
+    paths = get_paths(run_data)
+
+    with shelve.open(paths['forgotten_sample']) as forgotten_sample:
+        with shelve.open(paths['original_sample']) as original_sample:
+            for i, ratio in enumerate(run_data['ratios']):
+                sample_by_ratio = {}
+                for (md5, tokens) in original_sample.items():
+                    forgotten_email, frequency_threshold = forget_email(tokens, ratio, run_data)
+                    item = {
+                        'md5': md5,
+                        'original_email': tokens,
+                        'length': len(tokens),
+                        'ratio': ratio,
+                        'forgotten_email': forgotten_email,
+                        'frequency_threshold': frequency_threshold,
+                        'bloom_filter': None,
+                    }
+                    sample_by_ratio[md5] = item
+                forgotten_sample[str(ratio)] = sample_by_ratio
+
+    print('forgotten emails sampled')
 
 def md5_hash(msg):
     return hashlib.md5(msg.encode('utf-8')).hexdigest()
@@ -215,22 +232,22 @@ def tokens_to_ngrams(tokens, ngram_length):
         for j in range(len(ngram)):
             yield ngram[:j+1]
 
-def find_ngrams(partial_ngram, ngram_length, trie, bloom_filter=None):
+def find_ngrams(partial_ngram, run_data, bloom_filter=None, frequency_threshold=None):
     # split ngram into known-(partially) unkown part
     forgotten_indices = [i for i, gram in enumerate(partial_ngram) if gram is None]
-    remembered_indices = [i for i in range(ngram_length) if i not in forgotten_indices]
+    remembered_indices = [i for i in range(run_data['ngram_length']) if i not in forgotten_indices]
     if len(forgotten_indices) == 0:
         raise Exception(partial_ngram, 'not supposed to look up ngram without forgotten tokens')
     else:
         prefix = partial_ngram[:forgotten_indices[0]]
     # get ngrams from trie
     if len(prefix) == 0:
-        ngrams = trie.iteritems()
+        ngrams = run_data['trie'].iteritems()
     else:
-        ngrams = trie.iteritems(' '.join(prefix)+' ')
+        ngrams = run_data['trie'].iteritems(' '.join(prefix)+' ')
     # filter ngrams by length
     ngrams = ((gram.split(' '), count) for gram, (count,) in ngrams)
-    ngrams = ((gram, _) for gram, _ in ngrams if len(gram) == ngram_length)
+    ngrams = ((gram, _) for gram, _ in ngrams if len(gram) == run_data['ngram_length'])
     # filter by remembered tokens
     ngrams = (
         (gram, _) for gram, _ in ngrams if 
@@ -240,6 +257,11 @@ def find_ngrams(partial_ngram, ngram_length, trie, bloom_filter=None):
         ngrams = (
             (gram, _) for gram, _ in ngrams if 
             all(gram[i] in bloom_filter for i in forgotten_indices))
+    #filter by frequency threshold
+    if frequency_threshold is not None:
+        ngrams = (
+            (gram, frequency) for gram, frequency in ngrams if 
+            all(run_data['trie'][gram[i]] >= frequency_threshold for i in forgotten_indices))
     # sort ngrams in ascending order of occurence
     ngrams = sorted(ngrams, key=lambda item: item[1], reverse=True)
     return [gram for gram, _ in ngrams]
@@ -289,22 +311,24 @@ def count_emails(item, run_data):
     return count
 
 def make_emails(item, run_data):
+    if not run_data['use_bloom_filter'] and run_data['bloom_filter'] is not None:
+        raise Exception('use_bloom_filter is False but bloom_filter is not None')
+    if not run_data['use_frequency_threshold'] and run_data['frequency_threshold'] is not None:
+        raise Exception('use_frequency_threshold is False but frequency_threshold is not None')
+        
     tokens = item['forgotten_email']
-    if run_data['use_bloom_filter']:
-        bloom_filter = item['bloom_filter']
-    else:
-        bloom_filter = None
     ngram_length = run_data['ngram_length']
-
     graph_levels = [[] for i in range(len(tokens))]
 
     prefix = tokens[:ngram_length]
     # if the first token is forgotten, use reverse trie to enable prefix search
     if tokens[0] is None:
         prefix.reverse()
-        possible_ngrams = find_ngrams(prefix, ngram_length, run_data['reverse_trie'], bloom_filter)
+        possible_ngrams = find_ngrams(
+            prefix, run_data, item['bloom_filter'], item['frequency_threshold'])
     elif None in tokens[:ngram_length]:
-        possible_ngrams = find_ngrams(prefix, ngram_length, run_data['trie'], bloom_filter)
+        possible_ngrams = find_ngrams(
+            prefix, run_data, item['bloom_filter'], item['frequency_threshold'])
     else:
         possible_ngrams = [tokens[:ngram_length]]
 
@@ -334,7 +358,7 @@ def make_emails(item, run_data):
             # generate n-grams
             if token is None:
                 possible_ngrams = find_ngrams(
-                    target_ngram, ngram_length, run_data['trie'], bloom_filter)
+                    target_ngram, run_data, item['bloom_filter'], item['frequency_threshold'])
                 for ngram in possible_ngrams:
                     new_node = (ngram[-1], parent_node)
                     graph_levels[level].append(new_node)
@@ -368,10 +392,18 @@ def make_emails(item, run_data):
                     raise Exception(tokens, msg, 'Generated email does not match original')
             yield msg
 
-def forget_email(tokens, ratio):
-    email_length = len(tokens)
-    forget = random.sample(range(email_length), max(1, int(ratio/100*email_length)))
-    return [token if i not in forget else None for i, token in enumerate(tokens)]
+def forget_email(tokens, ratio, run_data):
+    number_to_forget = max(1, round(ratio*len(tokens)))
+    frequency_threshold = None
+    if run_data['forget_method'] == 'random':
+        forget = random.sample(range(len(tokens)), number_to_forget)
+    elif run_data['forget_method'] == 'frequency':
+        frequencies = [(i, run_data['trie'][token]) for i, token in enumerate(tokens)]
+        frequencies = sorted(frequencies, key=lambda item: item[1], reverse=True)
+        forget = [i for (i, token) in frequencies[:number_to_forget]]
+        frequency_threshold = frequencies[number_to_forget-1][1]
+    forgotten_email = [token if i not in forget else None for i, token in enumerate(tokens)]
+    return forgotten_email, frequency_threshold
 
 def recall_email(item, run_data):
     new_item = item.copy()
@@ -428,7 +460,9 @@ def print_to_csv(item, run_data, path):
                 run_data['ratios'],
                 run_data['bin_bounds'],
                 run_data['bin_size'],
-                run_data['sample'],
+                run_data['sample_id'],
+                run_data['forget_method'],
+                run_data['use_frequency_threshold'],
             ])
     except Exception as e:
         print(item)
@@ -438,30 +472,36 @@ def main(run_data):
     run_data['start_time'] = datetime.datetime.now().isoformat()
 
     paths = get_paths(run_data)
+    run_data['sample_id'] = paths['sample_id']
 
     if not os.path.exists(paths['emails']):
         save_emails(run_data)
     if not os.path.exists(paths['trie']) or not os.path.exists(paths['reverse_trie']):
         save_tries(run_data)
-    if not os.path.exists(paths['sample']):
-        paths['sample'] = save_sample(run_data)
-    if run_data['use_bloom_filter'] and not os.path.exists(paths['bloom_filters']):
-        save_bloom_filters(run_data)
-
     run_data['trie'] = marisa_trie.RecordTrie('I')
     run_data['trie'].load(paths['trie'])
     run_data['reverse_trie'] = marisa_trie.RecordTrie('I')
     run_data['reverse_trie'].load(paths['reverse_trie'])
+    if run_data['use_bloom_filter'] and not os.path.exists(paths['bloom_filters']):
+        save_bloom_filters(run_data)
+    if not os.path.exists(paths['original_sample']):
+        save_original_sample(run_data)
+    if not os.path.exists(paths['forgotten_sample']):
+        save_forgotten_sample(run_data)
+
+    print('run_data:')
+    PrettyPrinter().pprint(run_data)
+    print()
 
     with open(paths['results'], 'w') as csv_file:
         csv.writer(csv_file).writerow([
-            'md5',
-            'ratio',
-            'count',
-            'runtime',
-            'original_email',
-            'forgotten_email',
-            'length',
+            'item md5',
+            'item ratio',
+            'item count',
+            'item runtime',
+            'item original_email',
+            'item forgotten_email',
+            'item length',
             'run start_time',
             'run tokenizer',
             'run ngram_length',
@@ -469,16 +509,18 @@ def main(run_data):
             'run use_bloom_filter',
             'run use_hash',
             'run max_emails_generated',
-            'ratios',
-            'bin_bounds',
-            'bin_size',
-            'sample',
+            'run ratios',
+            'run bin_bounds',
+            'run bin_size',
+            'run sample_id',
+            'run forget_method',
+            'run use_frequency_threshold',
         ])
 
     sample_size = run_data['bin_size'] * len(run_data['bin_bounds'])
     # maxtasksperchild prevents memory leak from growing too much
     with Pool(maxtasksperchild=1) as pool:
-        with shelve.open(paths['sample']) as sample:
+        with shelve.open(paths['forgotten_sample']) as sample:
             for ratio in run_data['ratios']:
                 i = 0
                 print('processing ratio: {}'.format(ratio))
@@ -487,6 +529,9 @@ def main(run_data):
                     with shelve.open(paths['bloom_filters']) as bloom_filters:
                         for item in items:
                             item['bloom_filter'] = bloom_filters[item['md5']]
+                if not run_data['use_frequency_threshold']:
+                    for item in items:
+                        item['frequency_threshold'] = None
                 target = functools.partial(recall_email, run_data=run_data)
                 processed_items = pool.imap_unordered(target, items)
                 for item in processed_items:
@@ -505,18 +550,22 @@ DEFAULT_RUN_DATA = {
     'bin_bounds': [[i,i+10] for i in range(10, 100, 10)],
     'use_bloom_filter': True,
     'use_hash': False,
-    'sample': '',
+    'sample_id': '',
+    'forget_method': 'random',
+    'use_frequency_threshold': False,
 }
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('run_data', nargs='?', type=json.loads)
     parser.set_defaults(run_data=DEFAULT_RUN_DATA)
-    args = vars(parser.parse_args())
+    run_data = vars(parser.parse_args())['run_data']
     for param, default in DEFAULT_RUN_DATA.items():
-        if param not in args['run_data']:
-            args['run_data'][param] = default
-    print('run data:')
-    PrettyPrinter().pprint(args['run_data'])
-    print()
+        if param not in run_data:
+            run_data[param] = default
+    for param in run_data:
+        if param not in DEFAULT_RUN_DATA:
+            raise Exception('This run_data option does not exist')
+    if run_data['use_frequency_threshold'] and run_data['forget_method'] != 'frequency':
+        raise Exception('Cannot use frequency threshold if forget_method is not set to frequency')
     main(args['run_data'])
