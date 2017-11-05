@@ -1,24 +1,14 @@
-#macOS
-.DS_Store
-
-#dataset
 maildir/
-
-#preprocessing
 emails/
 tries/
 bloom_filters/
 samples/
-
-#results
 results/
-
-#graphs
 graphs/
+logs/
 
-#tmp
-nohup.out
-
+#macOS
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
