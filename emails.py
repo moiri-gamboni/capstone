@@ -10,6 +10,7 @@ import datetime
 import argparse
 import uuid
 import json
+import time
 
 from collections import Counter
 from multiprocessing import Pool
@@ -241,9 +242,7 @@ def save_forgotten_sample(run_data):
                     sample_by_ratio[md5] = item
                 forgotten_sample[str(ratio)] = sample_by_ratio
 
-    print('forgotten emails sampled with sample_id:')
-    print(paths['sample_id'])
-    return paths['sample_id']
+    print('forgotten emails sampled')
 
 def md5_hash(msg):
     return hashlib.md5(msg.encode('utf-8')).hexdigest()
@@ -444,31 +443,72 @@ def forget_email(tokens, ratio, run_data):
 
 def recall_email(item, run_data):
     new_item = item.copy()
-    time_start = datetime.datetime.now()
+    time_start = time.process_time()
     if run_data['use_hash']:
-        msgs = make_emails(item, run_data)
-        count = 0
-        md5s = set()
-        for msg in msgs:
-            count += 1
-            if count == run_data['max_emails_generated']:
-                new_item['runtime'] = -1
-                new_item['count'] = -1
-                return new_item
-            test_md5 = md5_hash(' '.join(msg))
-            if test_md5 in md5s:
-                raise Exception((item, 'Duplicate email generated'))
-            else:
-                md5s.add(test_md5)
-            if item['md5'] == test_md5:
-                runtime = (datetime.datetime.now()-time_start).total_seconds()
-                new_item['runtime'] = runtime
-                new_item['count'] = count
-                return new_item
-        raise Exception((item, 'No email matched hash'))
+        if run_data['use_partial_hash']:
+            count = 0
+            partial_items = []
+            lower_bounds = list(range(0, len(item['original_email']), run_data['partial_hash_length']))
+            if len(item['original_email']) - lower_bounds[-1] < run_data['ngram_length']:
+                lower_bounds[-1] = len(item['original_email']) - run_data['ngram_length']
+            for lower_bound in lower_bounds:
+                found = False
+                md5s = set()
+                partial_item = item.copy()
+                forgotten_tokens = item['forgotten_email'][lower_bound:lower_bound + run_data['partial_hash_length']]
+                original_tokens = item['original_email'][lower_bound:lower_bound + run_data['partial_hash_length']]
+                if None not in forgotten_tokens:
+                    continue
+                partial_item['forgotten_email'] = forgotten_tokens
+                partial_item['length'] = len(forgotten_tokens)
+                partial_item['original_email'] = None
+                partial_item['md5'] = md5_hash(' '.join(original_tokens))
+                for msg in make_emails(partial_item, run_data):
+                    count += 1
+                    if count == run_data['max_emails_generated']:
+                        new_item['runtime'] = -1
+                        new_item['count'] = -1
+                        return new_item
+                    test_md5 = md5_hash(' '.join(msg))
+                    if test_md5 in md5s:
+                        raise Exception((item, 'Duplicate email generated'))
+                    else:
+                        md5s.add(test_md5)
+                    if partial_item['md5'] == test_md5:
+                        found = True
+                        break
+                if not found:
+                    raise Exception((item, 'No email matched hash'))
+            runtime = time.process_time()-time_start
+            new_item['runtime'] = runtime
+            new_item['count'] = count
+            return new_item
+
+        else:
+            msgs = make_emails(item, run_data)
+            count = 0
+            md5s = set()
+            for msg in msgs:
+                count += 1
+                if count == run_data['max_emails_generated']:
+                    new_item['runtime'] = -1
+                    new_item['count'] = -1
+                    return new_item
+                test_md5 = md5_hash(' '.join(msg))
+                if test_md5 in md5s:
+                    raise Exception((item, 'Duplicate email generated'))
+                else:
+                    md5s.add(test_md5)
+                if item['md5'] == test_md5:
+                    runtime = time.process_time()-time_start
+                    new_item['runtime'] = runtime
+                    new_item['count'] = count
+                    return new_item
+            raise Exception((item, 'No email matched hash'))
+
     else:
         count = count_emails(item, run_data)
-        runtime = (datetime.datetime.now()-time_start).total_seconds()
+        runtime = time.process_time()-time_start
         new_item['count'] = count
         if count == -1:
             new_item['runtime'] = -1
@@ -505,7 +545,7 @@ def print_to_csv(item, run_data, path):
             run_data['max_email_length'],
         ])
 
-def main(run_data):
+def run_experiment(run_data):
     run_data['start_time'] = datetime.datetime.now().isoformat()
 
     paths = get_paths(run_data)
@@ -577,7 +617,7 @@ def main(run_data):
                     for item in items:
                         item['frequency_threshold'] = None
                 target = functools.partial(recall_email, run_data=run_data)
-                processed_items = pool.imap_unordered(target, items, chunksize=50)
+                processed_items = pool.imap_unordered(target, items, chunksize=10)
                 for item in processed_items:
                     i += 1
                     percentage = round(100*i/sample_size)
@@ -585,6 +625,73 @@ def main(run_data):
                         last_percentage = percentage
                         print('\tprocessed: {}%'.format(percentage))
                     print_to_csv(item, run_data, paths['results'])
+
+def run_all_experiments():
+    count = 0
+    experiments = []
+    default_run_data = get_run_data({})
+    sample_id = save_original_sample(default_run_data)
+
+    for use_bloom_filter in (True, False):
+        for bloom_error_rate in (0.01, 0.1):
+            for use_hash in (True, False):
+                for forget_method in ('frequency', 'random'):
+                    for use_frequency_threshold in (True, False):
+                        for use_partial_hash in (True, False):
+                            for partial_hash_length in range(10, 60, 10):
+                                # skip duplicate experiments
+                                if forget_method == 'random' and use_frequency_threshold:
+                                    continue
+                                if not use_hash and use_partial_hash:
+                                    continue
+                                if not use_partial_hash and partial_hash_length != 10:
+                                    continue
+                                if not use_bloom_filter and bloom_error_rate != 0.01:
+                                    continue
+                                count += 1
+                                run_data = {
+                                    'sample_id': sample_id,
+                                    'use_bloom_filter': use_bloom_filter,
+                                    'bloom_error_rate': bloom_error_rate,
+                                    'use_hash': use_hash,
+                                    'forget_method': forget_method,
+                                    'use_frequency_threshold': use_frequency_threshold,
+                                    'use_partial_hash': use_partial_hash,
+                                    'partial_hash_length': partial_hash_length,
+                                }
+                                run_data = get_run_data(run_data)
+                                experiments.append(run_data)
+
+    for i, run_data in enumerate(experiments):
+        for other_run_data in experiments[i+1:]:
+            if run_data == other_run_data:
+                raise Exception('Some experiments are duplicate')
+
+    for run_data in experiments:
+        run_experiment(run_data)
+
+def get_run_data(run_data):
+    for param, default in DEFAULT_RUN_DATA.items():
+        if param not in run_data:
+            run_data[param] = default
+    for param in run_data:
+        if param not in DEFAULT_RUN_DATA:
+            raise Exception('{} is not a valid run_data option'.format(param))
+    if run_data['use_partial_hash']:
+        run_data['use_hash'] = True
+    else:
+        run_data['partial_hash_length'] = None
+    if run_data['forget_method'] == 'random':
+        run_data['use_frequency_threshold'] = False
+    if not run_data['use_bloom_filter']:
+        run_data['bloom_error_rate'] = None
+    if run_data['use_bins']:
+        run_data['sample_size'] = None
+        run_data['max_email_length'] = None
+    else:
+        run_data['bin_bounds'] = None
+        run_data['bin_size'] = None
+    return run_data
 
 DEFAULT_RUN_DATA = {
     'tokenizer': 'moses',
@@ -603,6 +710,8 @@ DEFAULT_RUN_DATA = {
     'sample_size': 1000,
     # 198185 (=81%) emails lower than or equal to 500 in length
     'max_email_length': 500,
+    'use_partial_hash': True,
+    'partial_hash_length': 10,
 }
 
 if __name__ == '__main__':
@@ -610,20 +719,5 @@ if __name__ == '__main__':
     parser.add_argument('run_data', nargs='?', type=json.loads)
     parser.set_defaults(run_data=DEFAULT_RUN_DATA)
     run_data = vars(parser.parse_args())['run_data']
-    for param, default in DEFAULT_RUN_DATA.items():
-        if param not in run_data:
-            run_data[param] = default
-    for param in run_data:
-        if param not in DEFAULT_RUN_DATA:
-            raise Exception('This run_data option does not exist')
-    if run_data['forget_method'] == 'random':
-        run_data['use_frequency_threshold'] = False
-    if not run_data['use_bloom_filter']:
-        run_data['bloom_error_rate'] = None
-    if run_data['use_bins']:
-        run_data['sample_size'] = None
-        run_data['max_email_length'] = None
-    else:
-        run_data['bin_bounds'] = None
-        run_data['bin_size'] = None
-    main(run_data)
+    run_data = get_run_data(run_data)
+    run_experiment(run_data)
