@@ -64,7 +64,6 @@ def save_emails(run_data):
 
     paths = get_paths(run_data)
     
-    print('\tgetting files')
     email_paths = (
         os.path.join(dirpath, filename) 
         for dirpath, dirnames, filenames in os.walk('maildir/') 
@@ -74,7 +73,6 @@ def save_emails(run_data):
     total_emails = len(list(total_emails))
     # email_paths = itertools.islice(email_paths, 100)
 
-    print('\tparsing emails')
     with Pool() as pool:
         email_pipeline = pool.imap_unordered(email_to_str_list, email_paths, chunksize=1000)
         email_pipeline = (thread for thread in email_pipeline if thread is not None)
@@ -92,18 +90,18 @@ def save_emails(run_data):
                     emails[md5] = tokens
                     unique_count += 1
                 if i%1000 == 0:
-                    print('\t\tparsed {} emails'.format(i))
+                    print('\tprocessed {} emails'.format(i))
 
     print('finished saving emails')
     print('total emails: {}'.format(total_emails))
     print('parsed emails: {}'.format(parsed_count))
     print('unique parsed emails: {}'.format(unique_count))
 
-def initialize_bloom_filter(item):
+def initialize_bloom_filter(item, bloom_error_rate):
     md5, tokens = item
     bloom_filter = pybloom_live.BloomFilter(
         capacity=len(set(tokens)),
-        error_rate=run_data['bloom_error_rate'])
+        error_rate=bloom_error_rate)
     for token in tokens:
         bloom_filter.add(token)
     return (md5, bloom_filter)
@@ -116,13 +114,15 @@ def save_bloom_filters(run_data):
         with shelve.open(paths['bloom_filters'], 'n') as bf_shelve:
             with shelve.open(paths['emails'], 'r') as emails:
                 bloom_filters = pool.imap_unordered(
-                    initialize_bloom_filter, 
+                    functools.partial(
+                        initialize_bloom_filter, 
+                        bloom_error_rate=run_data['bloom_error_rate']), 
                     emails.items(),
                     chunksize=1000)
                 for i, (md5, bloom_filter) in enumerate(bloom_filters):
                     bf_shelve[md5] = bloom_filter
                     if i%1000 == 0:
-                        print('\processed {} emails'.format(i))
+                        print('\tprocessed {} emails'.format(i))
 
     print('finished calculating bloom filters')
 
@@ -473,11 +473,12 @@ def recall_email(item, run_data):
         tmp_count = 0
         found = False
         for msg in make_emails(email_part, run_data):
+            runtime = (time.process_time()-time_start)
             if run_data['use_hash']:
                 count += 1
-                if count == run_data['max_emails_generated']:
+                if runtime > run_data['max_runtime']:
                     returned_item['runtime'] = -1
-                    returned_item['count'] = -1
+                    returned_item['emails_generated'] = -1
                     return returned_item
                 test_md5 = md5_hash(' '.join(msg))
                 if test_md5 in md5s:
@@ -494,43 +495,45 @@ def recall_email(item, run_data):
             raise Exception((item, 'No email matched hash'))
         if not run_data['use_hash']:
             count *= tmp_count
-            if count >= run_data['max_emails_generated']:
+            if runtime >= run_data['max_runtime']:
                 returned_item['runtime'] = -1
-                returned_item['count'] = -1
+                returned_item['emails_generated'] = -1
                 return returned_item
  
     runtime = time.process_time()-time_start
     returned_item['runtime'] = runtime
-    returned_item['count'] = count
+    returned_item['emails_generated'] = count
     return returned_item
 
 def print_to_csv(item, run_data, path):
     with open(path, 'a') as csv_file:
         csv.writer(csv_file).writerow([
             item['md5'],
-            item['ratio'],
-            item['count'],
-            item['runtime'],
             item['original_email'],
-            item['forgotten_email'],
             item['length'],
+            item['ratio'],
+            item['forgotten_email'],
             item['frequency_threshold'],
+            item['emails_generated'],
+            item['runtime'],
             run_data['start_time'],
+            run_data['sample_id'],
             run_data['tokenizer'],
             run_data['ngram_length'],
-            run_data['bloom_error_rate'],
-            run_data['use_bloom_filter'],
-            run_data['use_hash'],
-            run_data['max_emails_generated'],
-            run_data['ratios'],
-            run_data['bin_bounds'],
+            run_data['max_email_length'],
+            run_data['max_runtime'],
+            run_data['use_bins'],
             run_data['bin_size'],
-            run_data['sample_id'],
+            run_data['bin_bounds'],
+            run_data['sample_size'],
+            run_data['ratios'],
             run_data['forget_method'],
             run_data['use_frequency_threshold'],
-            run_data['use_bins'],
-            run_data['sample_size'],
-            run_data['max_email_length'],
+            run_data['use_bloom_filter'],
+            run_data['bloom_error_rate'],
+            run_data['use_hash'],
+            run_data['hash_type'],
+            run_data['partial_hash_length'],
         ])
 
 def run_experiment(run_data):
@@ -561,29 +564,31 @@ def run_experiment(run_data):
     with open(paths['results'], 'w') as csv_file:
         csv.writer(csv_file).writerow([
             'item md5',
-            'item ratio',
-            'item count',
-            'item runtime',
             'item original_email',
-            'item forgotten_email',
             'item length',
+            'item ratio',
+            'item forgotten_email',
             'item frequency_threshold',
+            'item emails_generated',
+            'item runtime',
             'run start_time',
+            'run sample_id',
             'run tokenizer',
             'run ngram_length',
-            'run bloom_error_rate',
-            'run use_bloom_filter',
-            'run use_hash',
-            'run max_emails_generated',
-            'run ratios',
-            'run bin_bounds',
+            'run max_email_length',
+            'run max_runtime',
+            'run use_bins',
             'run bin_size',
-            'run sample_id',
+            'run bin_bounds',
+            'run sample_size',
+            'run ratios',
             'run forget_method',
             'run use_frequency_threshold',
-            'run use_bins',
-            'run sample_size',
-            'run max_email_length'
+            'run use_bloom_filter',
+            'run bloom_error_rate',
+            'run use_hash',
+            'run hash_type',
+            'run partial_hash_length'
         ])
 
     if run_data['use_bins']:
@@ -607,21 +612,27 @@ def run_experiment(run_data):
                 target = functools.partial(recall_email, run_data=run_data)
                 processed_items = pool.imap_unordered(target, items, chunksize=10)
                 for item in processed_items:
+                    print_to_csv(item, run_data, paths['results'])
                     i += 1
                     percentage = round(100*i/sample_size)
                     if percentage > last_percentage:
                         last_percentage = percentage
                         print('\tprocessed: {}%'.format(percentage))
-                    print_to_csv(item, run_data, paths['results'])
 
-def run_all_experiments():
+def run_all_experiments(base_run_data=None):
     count = 0
     experiments = []
-    default_run_data = get_run_data({})
-    sample_id = save_original_sample(default_run_data)
+    if base_run_data is None:
+        base_run_data = get_run_data({})
+    else:
+        base_run_data = get_run_data(base_run_data)
+    paths = get_paths(base_run_data)
+    if not os.path.exists(paths['emails']):
+        save_emails(base_run_data)
+    sample_id = save_original_sample(base_run_data)
 
     for use_bloom_filter in (True, False):
-        for bloom_error_rate in (0.01, 0.1):
+        for bloom_error_rate in (0.1, 0.01, 0.001):
             for use_hash in (True, False):
                 for forget_method in ('frequency', 'random'):
                     for use_frequency_threshold in (True, False):
@@ -634,10 +645,11 @@ def run_all_experiments():
                                     continue
                                 if hash_type != 'split' and partial_hash_length != 10:
                                     continue
-                                if not use_bloom_filter and bloom_error_rate != 0.01:
+                                if not use_bloom_filter and bloom_error_rate != 0.1:
                                     continue
                                 count += 1
-                                run_data = {
+                                run_data = base_run_data.copy()
+                                run_data.update({
                                     'sample_id': sample_id,
                                     'use_bloom_filter': use_bloom_filter,
                                     'bloom_error_rate': bloom_error_rate,
@@ -646,7 +658,7 @@ def run_all_experiments():
                                     'use_frequency_threshold': use_frequency_threshold,
                                     'hash_type': hash_type,
                                     'partial_hash_length': partial_hash_length,
-                                }
+                                })
                                 run_data = get_run_data(run_data)
                                 experiments.append(run_data)
 
@@ -655,8 +667,8 @@ def run_all_experiments():
             if run_data == other_run_data:
                 raise Exception('Some experiments are duplicate')
 
+    print('running {} experiments'.format(count))
     for run_data in experiments:
-        print('running {} experiments'.format(count))
         run_experiment(run_data)
 
 def get_run_data(run_data):
@@ -683,23 +695,23 @@ def get_run_data(run_data):
     return run_data
 
 DEFAULT_RUN_DATA = {
+    'sample_id': None,
     'tokenizer': 'moses',
     'ngram_length': 3,
-    'bloom_error_rate': 0.01,
-    'max_emails_generated': 50000,
+    # 198185 (=81%) emails lower than or equal to 500 in length
+    'max_email_length': 500,
+    'max_runtime': 1000,
+    'use_bins': False,
     'bin_size': 100,
-    'ratios': [round(0.1 * i, 1) for i in range(1, 6)],
     'bin_bounds': [[i,i+50] for i in range(50, 550, 50)],
-    'use_bloom_filter': True,
-    'use_hash': False,
-    'sample_id': None,
+    'sample_size': 1000,
+    'ratios': [round(0.1 * i, 1) for i in range(1, 6)],
     # random | frequency
     'forget_method': 'frequency',
     'use_frequency_threshold': True,
-    'use_bins': False,
-    'sample_size': 1000,
-    # 198185 (=81%) emails lower than or equal to 500 in length
-    'max_email_length': 500,
+    'use_bloom_filter': True,
+    'bloom_error_rate': 0.01,
+    'use_hash': False,
     # full | split | independent
     'hash_type': 'split',
     'partial_hash_length': 10,
