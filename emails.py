@@ -15,6 +15,9 @@ import time
 from collections import Counter
 from multiprocessing import Pool
 from pprint import PrettyPrinter
+
+import nltk
+nltk.download('perluniprops')
 from nltk.tokenize.moses import MosesTokenizer, MosesDetokenizer
 
 import pybloom_live
@@ -64,6 +67,7 @@ def save_emails(run_data):
 
     paths = get_paths(run_data)
     
+    print('\tgetting email files')
     email_paths = (
         os.path.join(dirpath, filename) 
         for dirpath, dirnames, filenames in os.walk('maildir/') 
@@ -211,9 +215,25 @@ def save_original_sample(run_data):
                         if len(sample) == run_data['sample_size']:
                             break
 
+    with open('samples/metadata', 'a+') as f:
+        metadata = get_sample_metadata(run_data)
+        json.dump([paths['sample_id'], metadata], f)
+        f.write('\n')
+
     print('original emails sampled with sample_id:')
     print(paths['sample_id'])
     return paths['sample_id']
+
+def get_sample_metadata(run_data):
+    return {
+        'use_bins': run_data['use_bins'],
+        'bin_bounds': run_data['bin_bounds'],
+        'tokenizer': run_data['tokenizer'],
+        'bin_size': run_data['bin_size'],
+        'ratios': run_data['ratios'],
+        'max_email_length': run_data['max_email_length'],
+        'sample_size': run_data['sample_size'],
+    }
 
 def save_forgotten_sample(run_data):
     print('sampling forgotten emails')
@@ -517,6 +537,7 @@ def print_to_csv(item, run_data, path):
             item['emails_generated'],
             item['runtime'],
             run_data['start_time'],
+            run_data['use_last_sample'],
             run_data['sample_id'],
             run_data['tokenizer'],
             run_data['ngram_length'],
@@ -539,8 +560,23 @@ def print_to_csv(item, run_data, path):
 def run_experiment(run_data):
     run_data['start_time'] = datetime.datetime.now().isoformat()
 
-    paths = get_paths(run_data)
-    run_data['sample_id'] = paths['sample_id']
+    found_sample = False
+    if run_data['use_last_sample'] and os.path.exists('samples/metadata'):
+        metadata = get_sample_metadata(run_data)
+        with open('samples/metadata', 'r') as f:
+            for line in f:
+                sample_id, other_metadata = json.loads(line)
+                if metadata == other_metadata:
+                    print('using older sample_id:')
+                    print(sample_id)
+                    run_data['sample_id'] = sample_id
+                    paths = get_paths(run_data)
+                    found_sample = True
+                    break
+
+    if not found_sample:
+        paths = get_paths(run_data)
+        run_data['sample_id'] = paths['sample_id']
 
     if not os.path.exists(paths['emails']):
         save_emails(run_data)
@@ -572,6 +608,7 @@ def run_experiment(run_data):
             'item emails_generated',
             'item runtime',
             'run start_time',
+            'run use_last_sample',
             'run sample_id',
             'run tokenizer',
             'run ngram_length',
@@ -678,6 +715,8 @@ def get_run_data(run_data):
     for param in run_data:
         if param not in DEFAULT_RUN_DATA:
             raise Exception('{} is not a valid run_data option'.format(param))
+    if run_data['use_last_sample']:
+        run_data['sample_id'] = None
     if not run_data['use_hash']:
         run_data['hash_type'] = None
     if run_data['hash_type'] != 'split':
@@ -695,6 +734,7 @@ def get_run_data(run_data):
     return run_data
 
 DEFAULT_RUN_DATA = {
+    'use_last_sample': True,
     'sample_id': None,
     'tokenizer': 'moses',
     'ngram_length': 3,
