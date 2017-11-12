@@ -1,0 +1,82 @@
+{
+    "_meta": {
+        "hash": {
+            "sha256": "54d6247877ba7c257e54af2f0ef9235d82c437f219f82db280c8886721136fdd"
+        },
+        "host-environment-markers": {
+            "implementation_name": "cpython",
+            "implementation_version": "3.6.0",
+            "os_name": "posix",
+            "platform_machine": "x86_64",
+            "platform_python_implementation": "CPython",
+            "platform_release": "16.7.0",
+            "platform_system": "Darwin",
+            "platform_version": "Darwin Kernel Version 16.7.0: Thu Jun 15 17:36:27 PDT 2017; root:xnu-3789.70.16~2/RELEASE_X86_64",
+            "python_full_version": "3.6.0",
+            "python_version": "3.6",
+            "sys_platform": "darwin"
+        },
+        "pipfile-spec": 6,
+        "requires": {
+            "python_version": "3.6"
+        },
+        "sources": [
+            {
+                "name": "pypi",
+                "url": "https://pypi.python.org/simple",
+                "verify_ssl": true
+            }
+        ]
+    },
+    "default": {
+        "bitarray": {
+            "hashes": [
+                "sha256:7da501356e48a83c61f479393681c1bc4b94e5a34ace7e08cb29e7dd9290ab18"
+            ],
+            "version": "==0.8.1"
+        },
+        "marisa-trie": {
+            "hashes": [
+                "sha256:dd1b5464d7ea2eb54758dcde40385d12e75cf74f6a44d27459ccb8c282ebc8c8",
+                "sha256:0e94d38468e454718577aa6994af12f66f24099a94c202f2f13c714be0c90d45",
+                "sha256:4cf4ff5bd9a135c3d1f6ab662b8dc6357ff502adc45c031f32e4c44f74268e22",
+                "sha256:26b7adaaa3bd3b6b8aaa9a9d0cc33f7ce0b0e6b85c1b0d0c591a7fd8f25ba001",
+                "sha256:89bd183e0f75357f074658492bb24a4bbac8e1a13fd0f54553017c122eeef134",
+                "sha256:e45291a022b5e680f393b4406202bfc6e9380dccd8d79b1627b3e4c0d98d457d",
+                "sha256:e89c07d52b8f385a9afb617f6b90f0632551ab58f1467edea1158d0837c8b097",
+                "sha256:ef381b579aee59098652a5fe5b5d9a93f4c93b21cd74d825fbb84c4447c21d83",
+                "sha256:6c8a79ca2e469b12b0bbd2927273c850873a7780bcecc3dd4c01ab30fa8c0346",
+                "sha256:accdaedcb86bac8fd6748c99dd577dd65a76026872bb5873626f3f401f57a043",
+                "sha256:c1200407b66dff3a31b505843f1f9c61431595c20972496a9ff4eaaecb792b35",
+                "sha256:f24540335c08b64a623c3622eb69b39a23003147cbabc75e06b49aded59962eb",
+                "sha256:65d873f2cdf22a59ee332aef827c08051019cc701beb54f2384b31dd83865321",
+                "sha256:32cbf5d5a6630e8bd6015fa7600f3e076bc321bf9768e6d4d41e751004ff6657",
+                "sha256:8870bc435ac9bd8aed483169f9008dbf9e40ae56cc3cb02a670fbb5d66975e11",
+                "sha256:212eb066ba52720bec8722454e80a9e29ab0454da980ebd7093148c2e7bdb63e",
+                "sha256:2a2258eacca9966325f9019378fc4621891f2482bc63e6441f70599595ed97d8"
+            ],
+            "version": "==0.7.4"
+        },
+        "nltk": {
+            "hashes": [
+                "sha256:2661f9971d983db314bbebd51ba770811a362c6597fd0f303bb1d3beadcb4834",
+                "sha256:8a3bad9ff7f67d2828a7915c2fab93e6ca910c2015ef40799e1805fccf2354e5"
+            ],
+            "version": "==3.2.5"
+        },
+        "pybloom-live": {
+            "hashes": [
+                "sha256:fc69f5f748cc92350e4c473ba9a955fa80ce6865792eae07de6c96a33941cc6f"
+            ],
+            "version": "==2.3.1"
+        },
+        "six": {
+            "hashes": [
+                "sha256:832dc0e10feb1aa2c68dcc57dbb658f1c7e65b9b61af69048abc87a2db00a0eb",
+                "sha256:70e8a77beed4562e7f14fe23a786b54f6296e34344c23bc42f07b15018ff98e9"
+            ],
+            "version": "==1.11.0"
+        }
+    },
+    "develop": {}
+}
