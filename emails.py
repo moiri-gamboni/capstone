@@ -171,20 +171,13 @@ def save_tries(run_data):
     if os.path.exists(paths['backward_counter']):
         os.remove(paths['backward_counter'])
 
-    if run_data['multiprocess']:
-        pool = Pool()
-        map_f = functools.partial(pool.imap_unordered, chunksize=1000)
-    else:
-        map_f = map
-
     print('\tcounting ngrams')
     with shelve.open(paths['forward_counter'], 'n') as forward_counter:
         with shelve.open(paths['backward_counter'], 'n') as backward_counter:
             with shelve.open(paths['emails'], 'r') as emails:
-                partial_counters = map_f(
+                partial_counters = map(
                     functools.partial(count_ngrams, ngram_length=run_data['ngram_length']),
                     emails.values())
-                tr = tracker.SummaryTracker()
                 for i, (forward_partial, backward_partial) in enumerate(partial_counters):
                     for k, v in forward_partial.items():
                         if k in forward_counter:
@@ -198,10 +191,6 @@ def save_tries(run_data):
                             backward_counter[k] = v
                     if i%1000 == 0:
                         print('\tprocessed {} emails'.format(i))
-
-            if run_data['multiprocess']:
-                pool.close()
-                pool.join()
 
             print('\tbuilding tries')
             for reverse in (False, True):
