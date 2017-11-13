@@ -18,6 +18,7 @@ from pprint import PrettyPrinter
 
 import nltk
 nltk.download('perluniprops')
+nltk.download('nonbreaking_prefixes')
 from nltk.tokenize.moses import MosesTokenizer, MosesDetokenizer
 
 import pybloom_live
