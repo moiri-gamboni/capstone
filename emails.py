@@ -12,14 +12,16 @@ import uuid
 import json
 import time
 
-from collections import Counter
+from collections import Counter, defaultdict
 from multiprocessing import Pool
 from pprint import PrettyPrinter
 
 import nltk
 nltk.download('perluniprops')
 nltk.download('nonbreaking_prefixes')
+
 from nltk.tokenize.moses import MosesTokenizer, MosesDetokenizer
+from pympler import muppy, summary, tracker
 
 import pybloom_live
 import marisa_trie
@@ -35,6 +37,8 @@ def get_paths(run_data):
                 run_data['tokenizer'], run_data['ngram_length'])
             paths['trie'] = 'tries/{}.marisa_trie'.format(option_str)
             paths['reverse_trie'] = 'tries/{}_reversed.marisa_trie'.format(option_str)
+            paths['forward_counter'] = 'tries/{}.forward_counter'.format(option_str)
+            paths['backward_counter'] = 'tries/{}.backward_counter'.format(option_str)
 
     if 'sample_id' in run_data:
         if run_data['sample_id'] is None:
@@ -103,7 +107,7 @@ def save_emails(run_data):
         pool.close()
         pool.join()
 
-    print('finished saving emails')
+    print('saved emails')
     print('total emails: {}'.format(total_emails))
     print('parsed emails: {}'.format(parsed_count))
     print('unique parsed emails: {}'.format(unique_count))
@@ -120,7 +124,7 @@ def initialize_bloom_filter(item, bloom_error_rate):
 def save_bloom_filters(run_data):
     paths = get_paths(run_data)
 
-    print('calculating bloom filters...')
+    print('saving bloom filters')
 
     if run_data['multiprocess']:
         pool = Pool()
@@ -144,11 +148,11 @@ def save_bloom_filters(run_data):
         pool.close()
         pool.join()
 
-    print('finished calculating bloom filters')
+    print('saved bloom filters')
 
 def count_ngrams(tokens, ngram_length):
-    counter = Counter()
-    reverse_counter = Counter()
+    counter = defaultdict(int)
+    reverse_counter = defaultdict(int)
     for i in range(len(tokens)):
         super_ngram = tokens[i:i+ngram_length]
         for j in range(len(super_ngram)):
@@ -159,11 +163,8 @@ def count_ngrams(tokens, ngram_length):
     return (counter, reverse_counter)
 
 def save_tries(run_data):
-    print('building tries')
+    print('saving tries')
     paths = get_paths(run_data)
-
-    forward_counter = Counter()
-    backward_counter = Counter()
 
     if run_data['multiprocess']:
         pool = Pool()
@@ -171,41 +172,58 @@ def save_tries(run_data):
     else:
         map_f = map
 
-    with shelve.open(paths['emails']) as emails:
-        partial_counters = map_f(
-            functools.partial(count_ngrams, ngram_length=run_data['ngram_length']),
-            emails.values())
-        for i, (forward_partial, backward_partial) in enumerate(partial_counters):
-            forward_counter.update(forward_partial)
-            backward_counter.update(backward_partial)
-            if i%1000 == 0:
-                print('\tprocessed {} emails'.format(i))
+    print('\tcounting ngrams')
+    with shelve.open(paths['forward_counter'], 'n') as forward_counter:
+        with shelve.open(paths['backward_counter'], 'n') as backward_counter:
+            with shelve.open(paths['emails'], 'r') as emails:
+                partial_counters = map_f(
+                    functools.partial(count_ngrams, ngram_length=run_data['ngram_length']),
+                    emails.values())
+                tr = tracker.SummaryTracker()
+                for i, (forward_partial, backward_partial) in enumerate(partial_counters):
+                    for k, v in forward_partial.items():
+                        if k in forward_counter:
+                            forward_counter[k] += v
+                        else:
+                            forward_counter[k] = v
+                    for k, v in backward_partial.items():
+                        if k in backward_counter:
+                            backward_counter[k] += v
+                        else:
+                            backward_counter[k] = v
+                    if i%1000 == 0:
+                        print('\tprocessed {} emails'.format(i))
 
-    if run_data['multiprocess']:
-        pool.close()
-        pool.join()
+            if run_data['multiprocess']:
+                pool.close()
+                pool.join()
 
-    for reverse in (False, True):
-        if reverse:
-            path = paths['reverse_trie']
-            counter = backward_counter
-        else:
-            path = paths['trie']
-            counter = forward_counter
+            print('\tbuilding tries')
+            for reverse in (False, True):
+                if reverse:
+                    path = paths['reverse_trie']
+                    counter = backward_counter
+                else:
+                    path = paths['trie']
+                    counter = forward_counter
 
-        if os.path.exists(path):
-            os.remove(path)
+                if os.path.exists(path):
+                    os.remove(path)
 
-        trie = marisa_trie.RecordTrie(
-            'I',
-            ((k, (v,)) for k, v in counter.items()),
-            order=marisa_trie.WEIGHT_ORDER)
-        trie.save(path)
-    print('finished building tries')
-    print('unique n-grams: {}'.format(len(forward_counter)))
+                trie = marisa_trie.RecordTrie(
+                    'I',
+                    ((k, (v,)) for k, v in counter.items()),
+                    order=marisa_trie.WEIGHT_ORDER)
+                trie.save(path)
+
+            print('saved tries')
+            print('unique n-grams: {}'.format(len(forward_counter)))
+
+    os.remove(paths['forward_counter'])
+    os.remove(paths['backward_counter'])
 
 def save_original_sample(run_data):
-    print('sampling original emails')
+    print('saving original email sample')
     paths = get_paths(run_data)
 
     if run_data['use_bins']:
@@ -245,7 +263,7 @@ def save_original_sample(run_data):
         json.dump([paths['sample_id'], metadata], f)
         f.write('\n')
 
-    print('original emails sampled with sample_id:')
+    print('saved original email sample')
     print(paths['sample_id'])
     return paths['sample_id']
 
@@ -261,7 +279,7 @@ def get_sample_metadata(run_data):
     }
 
 def save_forgotten_sample(run_data):
-    print('sampling forgotten emails')
+    print('saving forgotten email sample')
     paths = get_paths(run_data)
 
     if run_data['forget_method'] == 'frequency':
@@ -287,7 +305,7 @@ def save_forgotten_sample(run_data):
                     sample_by_ratio[md5] = item
                 forgotten_sample[str(ratio)] = sample_by_ratio
 
-    print('forgotten emails sampled')
+    print('saved forgotten email sample')
 
 def md5_hash(msg):
     return hashlib.md5(msg.encode('utf-8')).hexdigest()

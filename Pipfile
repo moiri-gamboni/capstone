@@ -10,6 +10,7 @@ name = "pypi"
 nltk = "*"
 pybloom-live = "*"
 marisa-trie = "*"
+pympler = "*"
 
 
 [dev-packages]
