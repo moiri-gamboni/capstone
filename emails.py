@@ -72,29 +72,35 @@ def save_emails(run_data):
         os.path.join(dirpath, filename) 
         for dirpath, dirnames, filenames in os.walk('maildir/') 
         for filename in filenames)
-    email_paths = filter(os.path.isfile, email_paths)
-    email_paths, total_emails = itertools.tee(email_paths)
-    total_emails = len(list(total_emails))
-    # email_paths = itertools.islice(email_paths, 100)
+    email_paths = list(filter(os.path.isfile, email_paths))
+    total_emails = len(email_paths)
 
-    with Pool() as pool:
-        email_pipeline = pool.imap_unordered(email_to_str_list, email_paths, chunksize=1000)
-        email_pipeline = (thread for thread in email_pipeline if thread is not None)
-        email_pipeline = (msg for thread in email_pipeline for msg in thread)
-        email_pipeline = pool.imap_unordered(
-            functools.partial(tokenize, tokenizer=run_data['tokenizer']), 
-            email_pipeline,
-            chunksize=1000)
-        parsed_count = 0
-        unique_count = 0
-        with shelve.open(paths['emails'], 'n') as emails:
-            for i, (md5, tokens) in enumerate(email_pipeline):
-                parsed_count += 1
-                if md5 not in emails:
-                    emails[md5] = tokens
-                    unique_count += 1
-                if i%1000 == 0:
-                    print('\tprocessed {} emails'.format(i))
+    if run_data['multi_process']:
+        pool = Pool()
+        map_f = functools.partial(pool.imap_unordered, chunksize=1000)
+    else:
+        map_f = map
+
+    email_pipeline = map_f(email_to_str_list, email_paths)
+    email_pipeline = (thread for thread in email_pipeline if thread is not None)
+    email_pipeline = (msg for thread in email_pipeline for msg in thread)
+    email_pipeline = map_f(
+        functools.partial(tokenize, tokenizer=run_data['tokenizer']),
+        email_pipeline)
+    parsed_count = 0
+    unique_count = 0
+    with shelve.open(paths['emails'], 'n') as emails:
+        for i, (md5, tokens) in enumerate(email_pipeline):
+            parsed_count += 1
+            if md5 not in emails:
+                emails[md5] = tokens
+                unique_count += 1
+            if i%1000 == 0:
+                print('\tprocessed {} emails'.format(i))
+
+    if run_data['multi_process']:
+        pool.close()
+        pool.join()
 
     print('finished saving emails')
     print('total emails: {}'.format(total_emails))
@@ -114,19 +120,28 @@ def save_bloom_filters(run_data):
     paths = get_paths(run_data)
 
     print('calculating bloom filters...')
-    with Pool() as pool:
-        with shelve.open(paths['bloom_filters'], 'n') as bf_shelve:
-            with shelve.open(paths['emails'], 'r') as emails:
-                bloom_filters = pool.imap_unordered(
-                    functools.partial(
-                        initialize_bloom_filter, 
-                        bloom_error_rate=run_data['bloom_error_rate']), 
-                    emails.items(),
-                    chunksize=1000)
-                for i, (md5, bloom_filter) in enumerate(bloom_filters):
-                    bf_shelve[md5] = bloom_filter
-                    if i%1000 == 0:
-                        print('\tprocessed {} emails'.format(i))
+
+    if run_data['multi_process']:
+        pool = Pool()
+        map_f = functools.partial(pool.imap_unordered, chunksize=1000)
+    else:
+        map_f = map
+
+    with shelve.open(paths['bloom_filters'], 'n') as bf_shelve:
+        with shelve.open(paths['emails'], 'r') as emails:
+            bloom_filters = map_f(
+                functools.partial(
+                    initialize_bloom_filter,
+                    bloom_error_rate=run_data['bloom_error_rate']),
+                emails.items())
+            for i, (md5, bloom_filter) in enumerate(bloom_filters):
+                bf_shelve[md5] = bloom_filter
+                if i%1000 == 0:
+                    print('\tprocessed {} emails'.format(i))
+
+    if run_data['multi_process']:
+        pool.close()
+        pool.join()
 
     print('finished calculating bloom filters')
 
@@ -148,17 +163,26 @@ def save_tries(run_data):
 
     forward_counter = Counter()
     backward_counter = Counter()
-    with Pool() as pool:
-        with shelve.open(paths['emails']) as emails:
-            partial_counters = pool.imap_unordered(
-                functools.partial(count_ngrams, ngram_length=run_data['ngram_length']), 
-                emails.values(),
-                chunksize=1000)
-            for i, (forward_partial, backward_partial) in enumerate(partial_counters):
-                forward_counter.update(forward_partial)
-                backward_counter.update(backward_partial)
-                if i%1000 == 0:
-                    print('\tprocessed {} emails'.format(i))
+
+    if run_data['multi_process']:
+        pool = Pool()
+        map_f = functools.partial(pool.imap_unordered, chunksize=1000)
+    else:
+        map_f = map
+
+    with shelve.open(paths['emails']) as emails:
+        partial_counters = map_f(
+            functools.partial(count_ngrams, ngram_length=run_data['ngram_length']),
+            emails.values())
+        for i, (forward_partial, backward_partial) in enumerate(partial_counters):
+            forward_counter.update(forward_partial)
+            backward_counter.update(backward_partial)
+            if i%1000 == 0:
+                print('\tprocessed {} emails'.format(i))
+
+    if run_data['multi_process']:
+        pool.close()
+        pool.join()
 
     for reverse in (False, True):
         if reverse:
@@ -537,6 +561,7 @@ def print_to_csv(item, run_data, path):
             item['emails_generated'],
             item['runtime'],
             run_data['start_time'],
+            run_data['multiprocess'],
             run_data['use_last_sample'],
             run_data['sample_id'],
             run_data['tokenizer'],
@@ -580,6 +605,8 @@ def run_experiment(run_data):
 
     if not os.path.exists(paths['emails']):
         save_emails(run_data)
+    save_emails(run_data)
+    exit(0)
     if not os.path.exists(paths['trie']) or not os.path.exists(paths['reverse_trie']):
         save_tries(run_data)
     run_data['trie'] = marisa_trie.RecordTrie('I')
@@ -608,6 +635,7 @@ def run_experiment(run_data):
             'item emails_generated',
             'item runtime',
             'run start_time',
+            'run multiprocess',
             'run use_last_sample',
             'run sample_id',
             'run tokenizer',
@@ -632,29 +660,39 @@ def run_experiment(run_data):
         sample_size = run_data['bin_size'] * len(run_data['bin_bounds'])
     else:
         sample_size = run_data['sample_size']
-    with Pool() as pool:
-        with shelve.open(paths['forgotten_sample'], 'r') as sample:
-            for ratio in run_data['ratios']:
-                i = 0
-                last_percentage = 0
-                print('processing ratio: {}'.format(ratio))
-                items = sample[str(ratio)].values()
-                if run_data['use_bloom_filter']:
-                    with shelve.open(paths['bloom_filters'], 'r') as bloom_filters:
-                        for item in items:
-                            item['bloom_filter'] = bloom_filters[item['md5']]
-                if not run_data['use_frequency_threshold']:
+
+    if run_data['multi_process']:
+        pool = Pool()
+        map_f = functools.partial(pool.imap_unordered, chunksize=10)
+    else:
+        map_f = map
+
+    with shelve.open(paths['forgotten_sample'], 'r') as sample:
+        for ratio in run_data['ratios']:
+            i = 0
+            last_percentage = 0
+            print('processing ratio: {}'.format(ratio))
+            items = sample[str(ratio)].values()
+            if run_data['use_bloom_filter']:
+                with shelve.open(paths['bloom_filters'], 'r') as bloom_filters:
                     for item in items:
-                        item['frequency_threshold'] = None
-                target = functools.partial(recall_email, run_data=run_data)
-                processed_items = pool.imap_unordered(target, items, chunksize=10)
-                for item in processed_items:
-                    print_to_csv(item, run_data, paths['results'])
-                    i += 1
-                    percentage = round(100*i/sample_size)
-                    if percentage > last_percentage:
-                        last_percentage = percentage
-                        print('\tprocessed: {}%'.format(percentage))
+                        item['bloom_filter'] = bloom_filters[item['md5']]
+            if not run_data['use_frequency_threshold']:
+                for item in items:
+                    item['frequency_threshold'] = None
+            target = functools.partial(recall_email, run_data=run_data)
+            processed_items = map_f(target, items)
+            for item in processed_items:
+                print_to_csv(item, run_data, paths['results'])
+                i += 1
+                percentage = round(100*i/sample_size)
+                if percentage > last_percentage:
+                    last_percentage = percentage
+                    print('\tprocessed: {}%'.format(percentage))
+
+    if run_data['multi_process']:
+        pool.close()
+        pool.join()
 
 def run_all_experiments(base_run_data=None):
     count = 0
@@ -734,6 +772,7 @@ def get_run_data(run_data):
     return run_data
 
 DEFAULT_RUN_DATA = {
+    'multiprocess': False,
     'use_last_sample': True,
     'sample_id': None,
     'tokenizer': 'moses',
