@@ -166,8 +166,10 @@ def save_tries(run_data):
     print('saving tries')
     paths = get_paths(run_data)
 
-    os.remove(paths['forward_counter'])
-    os.remove(paths['backward_counter'])
+    if os.path.exists(paths['forward_counter']):
+        os.remove(paths['forward_counter'])
+    if os.path.exists(paths['backward_counter']):
+        os.remove(paths['backward_counter'])
 
     if run_data['multiprocess']:
         pool = Pool()
