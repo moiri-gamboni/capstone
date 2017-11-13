@@ -166,6 +166,9 @@ def save_tries(run_data):
     print('saving tries')
     paths = get_paths(run_data)
 
+    os.remove(paths['forward_counter'])
+    os.remove(paths['backward_counter'])
+
     if run_data['multiprocess']:
         pool = Pool()
         map_f = functools.partial(pool.imap_unordered, chunksize=1000)
@@ -718,18 +721,14 @@ def run_all_experiments(base_run_data=None):
         base_run_data = get_run_data({})
     else:
         base_run_data = get_run_data(base_run_data)
-    paths = get_paths(base_run_data)
-    if not os.path.exists(paths['emails']):
-        save_emails(base_run_data)
-    sample_id = save_original_sample(base_run_data)
 
-    for use_bloom_filter in (True, False):
-        for bloom_error_rate in (0.1, 0.01, 0.001):
+    for bloom_error_rate in (0.1, 0.01, 0.001):
+        for use_bloom_filter in (True, False):
             for use_hash in (True, False):
                 for forget_method in ('frequency', 'random'):
                     for use_frequency_threshold in (True, False):
                         for hash_type in ('full', 'split', 'independent'):
-                            for partial_hash_length in range(10, 60, 10):
+                            for partial_hash_length in range(25, 125, 25):
                                 # skip duplicate experiments
                                 if forget_method == 'random' and use_frequency_threshold:
                                     continue
@@ -742,7 +741,7 @@ def run_all_experiments(base_run_data=None):
                                 count += 1
                                 run_data = base_run_data.copy()
                                 run_data.update({
-                                    'sample_id': sample_id,
+                                    'use_last_sample': True,
                                     'use_bloom_filter': use_bloom_filter,
                                     'bloom_error_rate': bloom_error_rate,
                                     'use_hash': use_hash,
