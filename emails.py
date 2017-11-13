@@ -75,7 +75,7 @@ def save_emails(run_data):
     email_paths = list(filter(os.path.isfile, email_paths))
     total_emails = len(email_paths)
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool = Pool()
         map_f = functools.partial(pool.imap_unordered, chunksize=1000)
     else:
@@ -98,7 +98,7 @@ def save_emails(run_data):
             if i%1000 == 0:
                 print('\tprocessed {} emails'.format(i))
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool.close()
         pool.join()
 
@@ -121,7 +121,7 @@ def save_bloom_filters(run_data):
 
     print('calculating bloom filters...')
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool = Pool()
         map_f = functools.partial(pool.imap_unordered, chunksize=1000)
     else:
@@ -139,7 +139,7 @@ def save_bloom_filters(run_data):
                 if i%1000 == 0:
                     print('\tprocessed {} emails'.format(i))
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool.close()
         pool.join()
 
@@ -164,7 +164,7 @@ def save_tries(run_data):
     forward_counter = Counter()
     backward_counter = Counter()
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool = Pool()
         map_f = functools.partial(pool.imap_unordered, chunksize=1000)
     else:
@@ -180,7 +180,7 @@ def save_tries(run_data):
             if i%1000 == 0:
                 print('\tprocessed {} emails'.format(i))
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool.close()
         pool.join()
 
@@ -661,7 +661,7 @@ def run_experiment(run_data):
     else:
         sample_size = run_data['sample_size']
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool = Pool()
         map_f = functools.partial(pool.imap_unordered, chunksize=10)
     else:
@@ -690,7 +690,7 @@ def run_experiment(run_data):
                     last_percentage = percentage
                     print('\tprocessed: {}%'.format(percentage))
 
-    if run_data['multi_process']:
+    if run_data['multiprocess']:
         pool.close()
         pool.join()
 
