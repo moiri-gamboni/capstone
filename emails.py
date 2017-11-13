@@ -606,8 +606,6 @@ def run_experiment(run_data):
 
     if not os.path.exists(paths['emails']):
         save_emails(run_data)
-    save_emails(run_data)
-    exit(0)
     if not os.path.exists(paths['trie']) or not os.path.exists(paths['reverse_trie']):
         save_tries(run_data)
     run_data['trie'] = marisa_trie.RecordTrie('I')
