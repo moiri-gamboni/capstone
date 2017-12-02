@@ -376,7 +376,6 @@ def split_by_fixed_length(item, run_data):
     if len(item['original_email']) - lower_bounds[-1] < run_data['ngram_length']:
         lower_bounds[-1] = len(item['original_email']) - run_data['ngram_length']
     for lower_bound in lower_bounds:
-        found = False
         original_tokens = item['original_email'][lower_bound:lower_bound + run_data['partial_hash_length']]
         forgotten_tokens = item['forgotten_email'][lower_bound:lower_bound + run_data['partial_hash_length']]
         if None not in forgotten_tokens:
@@ -512,31 +511,27 @@ def forget_email(tokens, ratio, run_data):
 def recall_email(item, run_data):
     time_start = time.process_time()
     returned_item = item.copy()
+    count = 0
+
     email_parts = []
-    if run_data['use_hash']:
-        count = 0
-    else:
-        count = 1
     if run_data['hash_type'] == 'full':
         email_parts = [item]
+    if run_data['hash_type'] == 'split':
+        email_parts = split_by_fixed_length(item, run_data)
     else:
-        if run_data['hash_type'] == 'split':
-            email_parts = split_by_fixed_length(item, run_data)
-        else:
-            email_parts = split_by_independent_parts(item, run_data)
+        email_parts = split_by_independent_parts(item, run_data)
 
     for email_part in email_parts:
         md5s = set()
-        tmp_count = 0
         found = False
         for msg in make_emails(email_part, run_data):
+            count += 1
             runtime = (time.process_time()-time_start)
+            if runtime > run_data['max_runtime']:
+                returned_item['runtime'] = -1
+                returned_item['emails_generated'] = -1
+                return returned_item
             if run_data['use_hash']:
-                count += 1
-                if runtime > run_data['max_runtime']:
-                    returned_item['runtime'] = -1
-                    returned_item['emails_generated'] = -1
-                    return returned_item
                 test_md5 = md5_hash(' '.join(msg))
                 if test_md5 in md5s:
                     raise Exception((item, 'Duplicate email generated'))
@@ -545,17 +540,9 @@ def recall_email(item, run_data):
                 if email_part['md5'] == test_md5:
                     found = True
                     break
-            else:
-                tmp_count += 1
 
         if run_data['use_hash'] and not found:
             raise Exception((item, 'No email matched hash'))
-        if not run_data['use_hash']:
-            count *= tmp_count
-            if runtime >= run_data['max_runtime']:
-                returned_item['runtime'] = -1
-                returned_item['emails_generated'] = -1
-                return returned_item
  
     runtime = time.process_time()-time_start
     returned_item['runtime'] = runtime
@@ -706,7 +693,6 @@ def run_experiment(run_data):
         pool.join()
 
 def run_all_experiments(base_run_data=None):
-    count = 0
     experiments = []
     if base_run_data is None:
         base_run_data = get_run_data({})
@@ -718,18 +704,17 @@ def run_all_experiments(base_run_data=None):
             for use_hash in (True, False):
                 for forget_method in ('frequency', 'random'):
                     for use_frequency_threshold in (True, False):
-                        for hash_type in ('full', 'split', 'independent'):
+                        for hash_type in ('full', 'split'):
                             for partial_hash_length in range(25, 125, 25):
                                 # skip duplicate experiments
                                 if forget_method == 'random' and use_frequency_threshold:
                                     continue
-                                if not use_hash and hash_type != 'full':
+                                if not use_hash and hash_type == 'split':
                                     continue
-                                if hash_type != 'split' and partial_hash_length != 10:
+                                if hash_type == 'full' and partial_hash_length != 25:
                                     continue
                                 if not use_bloom_filter and bloom_error_rate != 0.1:
                                     continue
-                                count += 1
                                 run_data = base_run_data.copy()
                                 run_data.update({
                                     'use_last_sample': True,
@@ -749,7 +734,7 @@ def run_all_experiments(base_run_data=None):
             if run_data == other_run_data:
                 raise Exception('Some experiments are duplicate')
 
-    print('running {} experiments'.format(count))
+    print('running {} experiments'.format(len(experiments)))
     for run_data in experiments:
         run_experiment(run_data)
 
@@ -786,19 +771,19 @@ DEFAULT_RUN_DATA = {
     'ngram_length': 3,
     # 198185 (=81%) emails lower than or equal to 500 in length
     'max_email_length': 500,
-    'max_runtime': 1000,
+    'max_runtime': 500,
     'use_bins': False,
     'bin_size': 100,
     'bin_bounds': [[i,i+50] for i in range(50, 550, 50)],
-    'sample_size': 1000,
-    'ratios': [round(0.1 * i, 1) for i in range(1, 6)],
+    'sample_size': 500,
+    'ratios': [round(0.1 * i, 1) for i in range(1, 4)],
     # random | frequency
     'forget_method': 'frequency',
     'use_frequency_threshold': True,
     'use_bloom_filter': True,
     'bloom_error_rate': 0.01,
     'use_hash': False,
-    # full | split | independent
+    # full | split
     'hash_type': 'split',
     'partial_hash_length': 10,
 }

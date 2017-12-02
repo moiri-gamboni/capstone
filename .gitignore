@@ -4,8 +4,7 @@ tries/
 bloom_filters/
 samples/
 results/
-graphs/
-logs/
+reports/
 
 #macOS
 .DS_Store
