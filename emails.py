@@ -513,12 +513,13 @@ def recall_email(item, run_data):
     returned_item = item.copy()
 
     if run_data['use_hash']:
-        count = 1
+        count = 0
         if run_data['hash_type'] == 'full':
             email_parts = [item]
         elif run_data['hash_type'] == 'split':
             email_parts = split_by_fixed_length(item, run_data)
     else:
+        count = 1
         email_parts = split_by_independent_parts(item, run_data)
 
     for email_part in email_parts:
@@ -545,10 +546,13 @@ def recall_email(item, run_data):
         if run_data['use_hash']:
             if not found:
                 raise Exception((item, 'No email matched hash'))
-            count += tmp_count
+            if not (run_data['hash_type'] == 'split' and tmp_count == 1):
+                count += tmp_count
         else:
             count *= tmp_count
  
+    if count == 0:
+        count = 1
     runtime = time.process_time()-time_start
     returned_item['runtime'] = runtime
     returned_item['emails_generated'] = count
@@ -705,10 +709,10 @@ def run_all_experiments(base_run_data=None):
         base_run_data = get_run_data(base_run_data)
 
     for bloom_error_rate in (0.1, 0.01, 0.001):
-        for retrieval_type in ('hash','bloom','none'):
+        for retrieval_type in ('hash', 'bloom', 'trie_only'):
             for forget_method in ('frequency', 'random'):
                 for use_frequency_threshold in (True, False):
-                    for hash_type in ('split','full'):
+                    for hash_type in ('split', 'full'):
                         for partial_hash_length in range(25, 125, 25):
                             if retrieval_type == 'hash':
                                 use_hash = True
@@ -716,7 +720,7 @@ def run_all_experiments(base_run_data=None):
                             elif retrieval_type == 'bloom':
                                 use_hash = False
                                 use_bloom_filter = True
-                            elif retrieval_type == 'none':
+                            elif retrieval_type == 'trie_only':
                                 use_hash = False
                                 use_bloom_filter = False
                             run_data = base_run_data.copy()
