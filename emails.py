@@ -11,10 +11,10 @@ import argparse
 import uuid
 import json
 import time
+import pprint
 
 from collections import Counter, defaultdict
 from multiprocessing import Pool
-from pprint import PrettyPrinter
 
 import nltk
 nltk.download('perluniprops')
@@ -511,21 +511,22 @@ def forget_email(tokens, ratio, run_data):
 def recall_email(item, run_data):
     time_start = time.process_time()
     returned_item = item.copy()
-    count = 0
 
-    email_parts = []
-    if run_data['hash_type'] == 'full':
-        email_parts = [item]
-    if run_data['hash_type'] == 'split':
-        email_parts = split_by_fixed_length(item, run_data)
+    if run_data['use_hash']:
+        count = 1
+        if run_data['hash_type'] == 'full':
+            email_parts = [item]
+        elif run_data['hash_type'] == 'split':
+            email_parts = split_by_fixed_length(item, run_data)
     else:
         email_parts = split_by_independent_parts(item, run_data)
 
     for email_part in email_parts:
         md5s = set()
         found = False
+        tmp_count = 0
         for msg in make_emails(email_part, run_data):
-            count += 1
+            tmp_count += 1
             runtime = (time.process_time()-time_start)
             if runtime > run_data['max_runtime']:
                 returned_item['runtime'] = -1
@@ -541,8 +542,12 @@ def recall_email(item, run_data):
                     found = True
                     break
 
-        if run_data['use_hash'] and not found:
-            raise Exception((item, 'No email matched hash'))
+        if run_data['use_hash']:
+            if not found:
+                raise Exception((item, 'No email matched hash'))
+            count += tmp_count
+        else:
+            count *= tmp_count
  
     runtime = time.process_time()-time_start
     returned_item['runtime'] = runtime
@@ -619,7 +624,7 @@ def run_experiment(run_data):
         save_forgotten_sample(run_data)
 
     print('run_data:')
-    PrettyPrinter().pprint(run_data)
+    pprint.pprint(run_data)
     print()
 
     with open(paths['results'], 'w') as csv_file:
@@ -700,41 +705,39 @@ def run_all_experiments(base_run_data=None):
         base_run_data = get_run_data(base_run_data)
 
     for bloom_error_rate in (0.1, 0.01, 0.001):
-        for use_bloom_filter in (True, False):
-            for use_hash in (True, False):
-                for forget_method in ('frequency', 'random'):
-                    for use_frequency_threshold in (True, False):
-                        for hash_type in ('full', 'split'):
-                            for partial_hash_length in range(25, 125, 25):
-                                # skip duplicate experiments
-                                if forget_method == 'random' and use_frequency_threshold:
-                                    continue
-                                if not use_hash and hash_type == 'split':
-                                    continue
-                                if hash_type == 'full' and partial_hash_length != 25:
-                                    continue
-                                if not use_bloom_filter and bloom_error_rate != 0.1:
-                                    continue
-                                run_data = base_run_data.copy()
-                                run_data.update({
-                                    'use_last_sample': True,
-                                    'use_bloom_filter': use_bloom_filter,
-                                    'bloom_error_rate': bloom_error_rate,
-                                    'use_hash': use_hash,
-                                    'forget_method': forget_method,
-                                    'use_frequency_threshold': use_frequency_threshold,
-                                    'hash_type': hash_type,
-                                    'partial_hash_length': partial_hash_length,
-                                })
-                                run_data = get_run_data(run_data)
-                                experiments.append(run_data)
+        for retrieval_type in ('hash','bloom','none'):
+            for forget_method in ('frequency', 'random'):
+                for use_frequency_threshold in (True, False):
+                    for hash_type in ('split','full'):
+                        for partial_hash_length in range(25, 125, 25):
+                            if retrieval_type == 'hash':
+                                use_hash = True
+                                use_bloom_filter = False
+                            elif retrieval_type == 'bloom':
+                                use_hash = False
+                                use_bloom_filter = True
+                            elif retrieval_type == 'none':
+                                use_hash = False
+                                use_bloom_filter = False
+                            run_data = base_run_data.copy()
+                            run_data.update({
+                                'use_last_sample': True,
+                                'use_bloom_filter': use_bloom_filter,
+                                'bloom_error_rate': bloom_error_rate,
+                                'use_hash': use_hash,
+                                'forget_method': forget_method,
+                                'use_frequency_threshold': use_frequency_threshold,
+                                'hash_type': hash_type,
+                                'partial_hash_length': partial_hash_length,
+                            })
+                            run_data = get_run_data(run_data)
+                            experiments.append(run_data)
 
-    for i, run_data in enumerate(experiments):
-        for other_run_data in experiments[i+1:]:
-            if run_data == other_run_data:
-                raise Exception('Some experiments are duplicate')
-
+    #removing duplicates
+    experiments = set([json.dumps(experiment) for experiment in experiments])
+    experiments = [json.loads(experiment) for experiment in experiments]
     print('running {} experiments'.format(len(experiments)))
+
     for run_data in experiments:
         run_experiment(run_data)
 
@@ -764,14 +767,14 @@ def get_run_data(run_data):
     return run_data
 
 DEFAULT_RUN_DATA = {
-    'multiprocess': False,
+    'multiprocess': True,
     'use_last_sample': True,
     'sample_id': None,
     'tokenizer': 'moses',
     'ngram_length': 3,
     # 198185 (=81%) emails lower than or equal to 500 in length
     'max_email_length': 500,
-    'max_runtime': 500,
+    'max_runtime': 120,
     'use_bins': False,
     'bin_size': 100,
     'bin_bounds': [[i,i+50] for i in range(50, 550, 50)],
